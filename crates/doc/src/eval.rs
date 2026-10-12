@@ -1575,6 +1575,23 @@ fn apply_traced(state: &mut ModelState, f: &Feature, tools: Vec<Traced>, op: Ope
             }
         }
     }
+    // Only a single solid target: batching must not change which bodies a join absorbs,
+    // sheet material tracking, or the separate bodies made by a New Body extrusion.
+    if tools.len() > 1
+        && matches!(f.kind, FeatureKind::Extrude { .. })
+        && matches!(op, Operation::Join | Operation::Cut)
+        && target_idx.len() == 1
+        && target_idx.first().and_then(|i| state.bodies.get(*i)).is_some_and(|b| !b.body.is_mesh() && !state.sheets.iter().any(|s| s.body == b.name))
+        && let Ok(Some(compound)) = kernel::compound_disjoint_extrusions(&tools)
+    {
+        // The optimization must not reject geometry the original sequential path can
+        // handle. A failed batch leaves the model untouched and retries the original tools.
+        let mut batched = state.clone();
+        if apply_op(&mut batched, f, vec![compound], op, targets).is_ok() {
+            *state = batched;
+            return Ok(());
+        }
+    }
     match op {
         Operation::Join => {
             // Each tool joins every target it meets into one body, kept under the first one's

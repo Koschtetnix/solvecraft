@@ -23,6 +23,75 @@ pub enum BoolOp {
     Intersect,
 }
 
+/// Batch separated extrusion tools without repeatedly unioning an ever-growing target.
+/// Construction caps provide conservative bounds, including the full circle of each arc;
+/// unsupported or touching tools retain the caller's sequential Boolean path.
+pub fn compound_disjoint_extrusions(tools: &[Body]) -> Result<Option<Body>> {
+    if tools.len() < 2 || tools.len() > 1024 {
+        return Ok(None);
+    }
+    guard("compound extrusion tools", || {
+        let mut bounds = Vec::with_capacity(tools.len());
+        let mut remaining = 16_384usize;
+        for tool in tools {
+            let Some(sources) = tool.face_sources() else { return Ok(None) };
+            let mut bb = solidcraft_geom::Aabb3::EMPTY;
+            let mut caps = 0;
+            for source in sources {
+                let Some(left) = remaining.checked_sub(1) else { return Ok(None) };
+                remaining = left;
+                match source {
+                    Some(crate::FaceSource::ExtrudeCap { region, plane, high }) => {
+                        caps += 1;
+                        // The bottom support is outward-facing, but its region retains
+                        // the original sketch coordinates (see build::extrude).
+                        let plane = if *high { *plane } else { solidcraft_geom::Plane { y: -plane.y, ..*plane } };
+                        for segment in &region.outer.segs {
+                            let Some(left) = remaining.checked_sub(1) else { return Ok(None) };
+                            remaining = left;
+                            match *segment {
+                                solidcraft_geom::Seg2::Line { a, b } => {
+                                    bb.add(plane.to_world(a));
+                                    bb.add(plane.to_world(b));
+                                }
+                                solidcraft_geom::Seg2::Arc { center, radius, .. } => {
+                                    for x in [-radius, radius] {
+                                        for y in [-radius, radius] {
+                                            bb.add(plane.to_world(center + solidcraft_geom::Vec2::new(x, y)));
+                                        }
+                                    }
+                                }
+                                _ => return Ok(None),
+                            }
+                        }
+                    }
+                    Some(crate::FaceSource::ExtrudeSide { .. }) => {}
+                    _ => return Ok(None),
+                }
+            }
+            if caps != 2 || bb.is_empty() || !bb.min.is_finite() || !bb.max.is_finite() {
+                return Ok(None);
+            }
+            bounds.push(bb);
+        }
+        for (i, a) in bounds.iter().enumerate() {
+            for b in bounds.iter().skip(i + 1) {
+                let gap = (a.diagonal().max(b.diagonal()) * 1e-6).max(1e-7);
+                if !(a.max.x + gap < b.min.x
+                    || b.max.x + gap < a.min.x
+                    || a.max.y + gap < b.min.y
+                    || b.max.y + gap < a.min.y
+                    || a.max.z + gap < b.min.z
+                    || b.max.z + gap < a.min.z)
+                {
+                    return Ok(None);
+                }
+            }
+        }
+        join_pieces(tools.to_vec())
+    })
+}
+
 /// Whether a union can sew two matching planar faces without intersecting them.
 /// Callers can retain the exact touching tool instead of extending it into material.
 pub fn can_join_touching_faces(a: &Body, b: &Body) -> bool {
@@ -224,6 +293,37 @@ fn trivial(
 #[cfg(test)]
 mod shortcut_tests {
     use super::*;
+
+    #[test]
+    fn extrusion_compound_requires_separated_construction_bounds() {
+        use solidcraft_geom::{Loop2, Plane, Region2, Vec2};
+        let rectangle = |x: f64| Region2 {
+            outer: Loop2::polygon(&[Vec2::new(x, 0.0), Vec2::new(x + 2.0, 0.0), Vec2::new(x + 2.0, 2.0), Vec2::new(x, 2.0)]),
+            holes: vec![],
+        };
+        let plane = Plane::from_normal(Vec3::new(100.0, -20.0, 8.0), Vec3::new(1.0, 2.0, 3.0)).unwrap();
+        let tools = crate::extrude(&plane, &[rectangle(0.0), rectangle(20.0)], -1.0, 5.0).unwrap();
+        let compound = compound_disjoint_extrusions(&tools).unwrap().unwrap();
+        assert_eq!(compound.shell_count(), 2);
+        assert!((crate::measure(&compound).unwrap().volume - 48.0).abs() < 1e-8);
+        assert!(compound.validity().is_empty());
+        for x in [1.0, 2.0, 2.000_000_1] {
+            let touching = crate::extrude(&solidcraft_geom::Plane::XY, &[rectangle(0.0), rectangle(x)], 0.0, 5.0).unwrap();
+            assert!(compound_disjoint_extrusions(&touching).unwrap().is_none());
+        }
+        let unsupported = [crate::sphere(Vec3::ZERO, 1.0).unwrap(), crate::sphere(Vec3::new(10.0, 0.0, 0.0), 1.0).unwrap()];
+        assert!(compound_disjoint_extrusions(&unsupported).unwrap().is_none());
+    }
+
+    #[test]
+    fn extrusion_compound_includes_arc_extrema_between_seam_vertices() {
+        use solidcraft_geom::{Loop2, Plane, Region2, Vec2};
+        let circle = |x| Region2 { outer: Loop2::circle(Vec2::new(x, 0.0), 2.0), holes: vec![] };
+        let separated = crate::extrude(&Plane::XY, &[circle(0.0), circle(8.0)], 0.0, 5.0).unwrap();
+        assert!(compound_disjoint_extrusions(&separated).unwrap().is_some());
+        let overlapping = crate::extrude(&Plane::XY, &[circle(0.0), circle(3.0)], 0.0, 5.0).unwrap();
+        assert!(compound_disjoint_extrusions(&overlapping).unwrap().is_none());
+    }
 
     #[test]
     fn curved_near_contact_never_uses_a_shell_only_boolean_candidate() {

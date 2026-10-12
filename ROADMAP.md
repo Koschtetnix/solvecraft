@@ -274,6 +274,9 @@ completed drawings publish atomically. The browser still exports synchronously.
 
 ## 0.2.1 critical fixes
 
+- Separated multi-profile Join/Cut extrusions into one solid target batch their tools using
+  conservative construction bounds, avoiding a Boolean rebuild for every profile. Tool
+  previews appear before Boolean validation completes; errors still reach the dialog.
 - Axis view and navigation controls stay anchored to the viewport when feature dialogs or
   the command palette open, at normal and enlarged display scales. Fit still accounts for
   dialog coverage; covered controls do not receive clicks through dialogs.

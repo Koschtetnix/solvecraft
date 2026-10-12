@@ -312,3 +312,71 @@ fn joined_loft_frames_plan_their_display_at_every_quality() {
         }
     }
 }
+
+#[test]
+fn many_extrusion_profiles_preserve_material_and_body_identity() {
+    for operation in ["join", "cut", "new"] {
+        let mut s = Session::default();
+        s.execute("solid.box", &json!({"length": 40, "width": 30, "height": 20, "body_name": "Stock"})).unwrap();
+        s.execute("sketch.create", &json!({"plane": {"origin": [0, 0, 20], "x_dir": [1, 0, 0], "y_dir": [0, 1, 0]}})).unwrap();
+        for i in 0..6 {
+            for j in 0..4 {
+                let (x, y) = (2 + i * 6, 2 + j * 7);
+                s.execute("sketch.rectangle.two_point", &json!({"p0": [x, y], "p1": [x + 4, y + 4]})).unwrap();
+            }
+        }
+        s.execute("sketch.finish", &json!({})).unwrap();
+        let distance = if operation == "cut" { -5 } else { 5 };
+        let before = s.revision;
+        s.execute("solid.extrude", &json!({"distance": distance, "operation": operation})).unwrap();
+        let state = s.model.state();
+        assert_eq!(state.bodies.len(), if operation == "new" { 25 } else { 1 });
+        let expected = 24_000.0
+            + match operation {
+                "join" => 1920.0,
+                "cut" => -1920.0,
+                _ => 0.0,
+            };
+        assert!((volume(&s, "Stock") - expected).abs() < 1e-6);
+        let stock = state.body("Stock").unwrap();
+        for (point, present) in [([3.0, 3.0, 22.0], operation == "join"), ([3.0, 3.0, 18.0], operation != "cut"), ([7.0, 3.0, 18.0], true)] {
+            assert_eq!(stock.mesh().contains(solidcraft_geom::Vec3::from(point)), present, "{operation}: {point:?}");
+        }
+        assert!(stock.body.validity().is_empty());
+        assert!(s.revision > before);
+        s.execute("edit.undo", &json!({})).unwrap();
+        assert!((volume(&s, "Stock") - 24_000.0).abs() < 1e-6);
+        s.execute("edit.redo", &json!({})).unwrap();
+        assert!((volume(&s, "Stock") - expected).abs() < 1e-6);
+    }
+}
+
+#[test]
+fn many_circular_extrusion_profiles_cut_a_curved_target() {
+    let mut s = Session::default();
+    s.execute("solid.cylinder", &json!({"radius": 20, "height": 20, "body_name": "Stock"})).unwrap();
+    s.execute("sketch.create", &json!({"plane": {"origin": [0, 0, -1], "x_dir": [1, 0, 0], "y_dir": [0, 1, 0]}})).unwrap();
+    for x in [-9, -3, 3, 9] {
+        for y in [-9, -3, 3, 9] {
+            s.execute("sketch.circle.center", &json!({"center": [x, y], "radius": 1})).unwrap();
+        }
+    }
+    s.execute("sketch.finish", &json!({})).unwrap();
+    s.execute("solid.extrude", &json!({"distance": 22, "operation": "cut", "targets": ["Stock"]})).unwrap();
+    // The rebuilt caps mesh more finely than the original cylinder. Compare with the
+    // analytic material volume, rather than subtracting two differently faceted meshes.
+    let expected = (400.0 - 16.0) * std::f64::consts::PI * 20.0;
+    let actual = volume(&s, "Stock");
+    assert!((actual - expected).abs() < expected * 1e-5, "{actual} vs {expected}");
+    let state = s.model.state();
+    assert_eq!(state.bodies.len(), 1);
+    let stock = state.body("Stock").unwrap();
+    assert!(stock.body.validity().is_empty());
+    let mesh = stock.mesh();
+    assert!(mesh.contains(solidcraft_geom::Vec3::new(0.0, 0.0, 10.0)));
+    for x in [-9.0, -3.0, 3.0, 9.0] {
+        for y in [-9.0, -3.0, 3.0, 9.0] {
+            assert!(!mesh.contains(solidcraft_geom::Vec3::new(x, y, 10.0)), "hole at {x}, {y}");
+        }
+    }
+}
