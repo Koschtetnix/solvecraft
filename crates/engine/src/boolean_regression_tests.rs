@@ -380,3 +380,56 @@ fn many_circular_extrusion_profiles_cut_a_curved_target() {
         }
     }
 }
+
+#[test]
+fn coplanar_body_faces_extrude_together_and_replay_their_links() {
+    let mut s = Session::default();
+    s.execute("solid.box", &json!({"length":64,"width":64,"height":20,"body_name":"Plate"})).unwrap();
+    s.execute("sketch.create", &json!({"plane":{"origin":[0,0,20],"x_dir":[1,0,0],"y_dir":[0,1,0]}})).unwrap();
+    let mut faces = Vec::new();
+    for i in 0..8 {
+        for j in 0..8 {
+            let (x, y) = (2 + i * 7, 2 + j * 7);
+            s.execute("sketch.rectangle.two_point", &json!({"p0":[x,y],"p1":[x+4,y+4]})).unwrap();
+            faces.push(json!([x + 2, y + 2, 26]));
+        }
+    }
+    s.execute("sketch.finish", &json!({})).unwrap();
+    s.execute("solid.extrude", &json!({"distance":6,"operation":"join"})).unwrap();
+    let (features, undo) = (s.doc.features.len(), s.undo.len());
+    s.execute("solid.extrude", &json!({"faces":faces,"distance":-7,"operation":"cut"})).unwrap();
+    assert_eq!(s.doc.features.len(), features + 2, "one linked sketch and one extrusion");
+    assert_eq!(s.undo.len(), undo + 1);
+    let actual = volume(&s, "Plate");
+    let state = s.model.state();
+    let sketch = state.sketch(4).unwrap();
+    assert!((actual - 80_896.0).abs() < 1e-5, "volume {actual}; plane {:?}; profiles {}", sketch.plane, sketch.profiles.len());
+    assert_eq!(s.model.state().bodies.len(), 1);
+    let document = serde_json::from_value(serde_json::to_value(s.doc.as_ref()).unwrap()).unwrap();
+    let mut reopened = Session { doc: std::sync::Arc::new(document), ..Session::default() };
+    reopened.refresh();
+    assert!((volume(&reopened, "Plate") - 80_896.0).abs() < 1e-5);
+    s.execute("edit.undo", &json!({})).unwrap();
+    assert_eq!(s.doc.features.len(), features);
+    s.execute("edit.redo", &json!({})).unwrap();
+    assert!((volume(&s, "Plate") - 80_896.0).abs() < 1e-5);
+}
+
+#[test]
+fn unsupported_face_groups_are_atomic() {
+    let mut s = Session::default();
+    s.execute("solid.box", &json!({"length":10,"width":10,"height":10})).unwrap();
+    let before = serde_json::to_value(s.doc.as_ref()).unwrap();
+    let (revision, undo) = (s.revision, s.undo.len());
+    for faces in [
+        json!([]),
+        json!([[5, 5, 10], [5, 5, 0]]),
+        json!([[5, 5, 10], [5, 0, 5]]),
+        json!([[5, 5, 10], [1000, 1000, 1000]]),
+        json!(vec![[5, 5, 10]; 1025]),
+    ] {
+        assert!(s.execute("solid.extrude", &json!({"faces":faces,"distance":5,"operation":"join"})).is_err());
+        assert_eq!(serde_json::to_value(s.doc.as_ref()).unwrap(), before);
+        assert_eq!((s.revision, s.undo.len()), (revision, undo));
+    }
+}

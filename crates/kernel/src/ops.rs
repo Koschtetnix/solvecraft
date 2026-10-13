@@ -23,6 +23,14 @@ pub enum BoolOp {
     Intersect,
 }
 
+/// Exact planar Booleans need no sampled enlargement of their tool footprint.
+pub fn is_planar(body: &Body) -> bool {
+    if body.is_mesh() || body.face_count() > 16_384 {
+        return false;
+    }
+    guard("planar body", || Ok(body.solid.face_iter().all(|face| matches!(face.oriented_surface(), mt::Surface::Plane(_))))).unwrap_or(false)
+}
+
 /// Batch separated extrusion tools without repeatedly unioning an ever-growing target.
 /// Construction caps provide conservative bounds, including the full circle of each arc;
 /// unsupported or touching tools retain the caller's sequential Boolean path.

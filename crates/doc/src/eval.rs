@@ -2977,6 +2977,15 @@ fn feature_tools_with_constructor(
             let mut footprints = Vec::with_capacity(regions.len());
             // Each tool's extent along the normal (they differ where one is run on into a face).
             let mut extents: Vec<(f64, f64)> = Vec::with_capacity(regions.len());
+            let plain_targets = crate::plain(targets);
+            let exact_planar_cut = *operation == Operation::Cut
+                && ss.sketch.links.len() > 1
+                && ss.sketch.links.iter().all(|link| matches!(&link.source, solidcraft_sketch::LinkSource::Face { .. }))
+                && st
+                    .bodies
+                    .iter()
+                    .filter(|body| plain_targets.is_empty() || plain_targets.iter().any(|target| target == "*" || target == &body.name))
+                    .all(|body| kernel::is_planar(&body.body));
             for r in &regions {
                 if *operation == Operation::Join {
                     let exact = centered_extrude(&ss.plane, r, lo + off, hi + off, Some(&ss))?;
@@ -2994,11 +3003,14 @@ fn feature_tools_with_constructor(
                         continue;
                     }
                 }
-                let (l2, h2) = extend_for_coplanar(st, &ss.plane, r, lo + off, hi + off, *operation, &crate::plain(targets));
+                let (l2, h2) = if exact_planar_cut {
+                    (lo + off, hi + off)
+                } else {
+                    extend_for_coplanar(st, &ss.plane, r, lo + off, hi + off, *operation, &plain_targets)
+                };
                 let probe = |p: Vec2| (1..4).map(|k| ss.plane.to_world(p) + n * (lo + off + (hi - lo) * k as f64 / 4.0)).collect::<Vec<_>>();
                 let original = r;
-                let plain_targets = crate::plain(targets);
-                let r = grow_profile_for_coplanar(st, r, *operation, &plain_targets, &probe);
+                let r = if exact_planar_cut { r.clone() } else { grow_profile_for_coplanar(st, r, *operation, &plain_targets, &probe) };
                 let r = fill_void_holes(st, &r, *operation, &plain_targets, &ss.plane, (l2, h2));
                 untrimmed &= l2 == lo + off && h2 == hi + off && &r == original;
                 tools.extend(centered_extrude(&ss.plane, &r, l2, h2, Some(&ss))?);
