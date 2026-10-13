@@ -433,3 +433,106 @@ fn unsupported_face_groups_are_atomic() {
         assert_eq!((s.revision, s.undo.len()), (revision, undo));
     }
 }
+
+#[test]
+fn imported_rotated_face_extrusions_preserve_other_operations_and_bodies() {
+    use solvecraft_geom::Vec3;
+    let mut source = Session::default();
+    source.execute("solid.box", &json!({"corner":[-16,-16,-3],"length":32,"width":32,"height":1,"body_name":"Other"})).unwrap();
+    source.execute("solid.cylinder", &json!({"radius":14,"height":8,"body_name":"Stock"})).unwrap();
+    let mut outlines = Vec::new();
+    let mut centers = Vec::new();
+    for i in 0..12 {
+        let angle = i as f64 * std::f64::consts::TAU / 12.;
+        let (c, s) = (angle.cos(), angle.sin());
+        let outline: Vec<_> =
+            [(-2., -2.), (2., -2.), (2., 2.), (-2., 2.)].into_iter().map(|(x, y)| [10.7 * c + x * c - y * s, 10.7 * s + x * s + y * c]).collect();
+        outlines.push(outline);
+        centers.push([10.7 * c, 10.7 * s, 12.]);
+    }
+    let draw = |session: &mut Session, height: f64| {
+        session.execute("sketch.create", &json!({"plane":{"origin":[0,0,height],"x_dir":[1,0,0],"y_dir":[0,1,0]}})).unwrap();
+        for outline in &outlines {
+            session.execute("sketch.line", &json!({"points":outline,"closed":true,"infer":false})).unwrap();
+        }
+        session.execute("sketch.finish", &json!({})).unwrap();
+    };
+    draw(&mut source, 8.);
+    source.execute("solid.extrude", &json!({"distance":4,"operation":"join"})).unwrap();
+    // An original public-safe STEP example, with rotated full-face seams and a
+    // curved target. No vendor/user design is part of this regression.
+    let path = std::env::temp_dir().join(format!("solvecraft-face-extrusion-{}.step", std::process::id()));
+    source.execute("file.export", &json!({"path":path.to_string_lossy()})).unwrap();
+    let mut imported = Session::default();
+    imported.execute("doc.open", &json!({"path":path.to_string_lossy()})).unwrap();
+    std::fs::remove_file(path).unwrap();
+    let original = imported.model.state();
+    let other = original.body("Other").unwrap().body.clone();
+    for (operation, distance) in [("join", 2.), ("cut", -1.), ("new", 2.), ("intersect", -1.)] {
+        let mut grouped = imported.scratch();
+        grouped.execute("solid.extrude", &json!({"faces":centers,"distance":distance,"operation":operation})).unwrap();
+        let mut reference = imported.scratch();
+        draw(&mut reference, 12.);
+        if matches!(operation, "join" | "cut") {
+            // Individual tools retain the original Boolean and participant path.
+            for index in 0..12 {
+                reference
+                    .execute("solid.extrude", &json!({"sketch":"Sketch1","profiles":[index],"distance":distance,"operation":operation}))
+                    .unwrap();
+            }
+        } else {
+            reference.execute("solid.extrude", &json!({"distance":distance,"operation":operation})).unwrap();
+        }
+        let actual = grouped.model.state();
+        let expected = reference.model.state();
+        assert_eq!(actual.bodies.len(), expected.bodies.len(), "{operation}");
+        for body in &actual.bodies {
+            let reference = expected.body(&body.name).unwrap();
+            // Fixed fine chord tolerance: cap subdivision can change the default
+            // adaptive mesh's cylinder faceting without changing its analytic surface.
+            let (a, b) = (body.body.tessellate(1e-5).unwrap().measure().volume, reference.body.tessellate(1e-5).unwrap().measure().volume);
+            assert!((a - b).abs() < b.max(1.) * 1e-6, "{operation}: {} {a} vs {b}", body.name);
+            assert!(body.body.validity().is_empty(), "{operation}: {}", body.name);
+            let (a, b) = (body.mesh(), reference.mesh());
+            for center in &centers {
+                for z in [7., 11.5, 13.] {
+                    let point = Vec3::new(center[0], center[1], z);
+                    assert_eq!(a.contains(point), b.contains(point), "{operation}: {} {point:?}", body.name);
+                }
+            }
+        }
+        if operation != "intersect" {
+            let unchanged = &actual.body("Other").unwrap().body;
+            assert_eq!(unchanged.face_count(), other.face_count());
+            assert_eq!(unchanged.color(), other.color());
+            assert_eq!(unchanged.tessellate(0.01).unwrap().positions, other.tessellate(0.01).unwrap().positions, "unaffected imported body");
+        }
+    }
+}
+
+#[test]
+fn multi_target_join_keeps_nearby_bodies_and_original_absorption_order() {
+    for (second_x, expected_count) in [(10.0015, 2), (9., 1)] {
+        let mut session = Session::default();
+        session.execute("solid.box", &json!({"length":10,"width":10,"height":10,"body_name":"Stock"})).unwrap();
+        session.execute("solid.box", &json!({"corner":[second_x,8,10],"length":1,"width":1,"height":2,"body_name":"Other"})).unwrap();
+        session.execute("sketch.create", &json!({"plane":{"origin":[0,0,10],"x_dir":[1,0,0],"y_dir":[0,1,0]}})).unwrap();
+        for origin in [[0., 0.], [8., 8.]] {
+            session.execute("sketch.rectangle.two_point", &json!({"p0":origin,"p1":[origin[0]+2.,origin[1]+2.]})).unwrap();
+        }
+        session.execute("sketch.finish", &json!({})).unwrap();
+        let mut reference = session.scratch();
+        for index in 0..2 {
+            reference.execute("solid.extrude", &json!({"sketch":"Sketch1","profiles":[index],"distance":2,"operation":"join"})).unwrap();
+        }
+        session.execute("solid.extrude", &json!({"distance":2,"operation":"join"})).unwrap();
+        assert_eq!(session.model.state().bodies.len(), expected_count);
+        assert_eq!(
+            session.model.state().bodies.iter().map(|body| body.name.clone()).collect::<Vec<_>>(),
+            reference.model.state().bodies.iter().map(|body| body.name.clone()).collect::<Vec<_>>()
+        );
+        for body in &session.model.state().bodies {
+            assert!((volume(&session, &body.name) - volume(&reference, &body.name)).abs() < 1e-6);
+        }
+    }
+}

@@ -275,11 +275,15 @@ completed drawings publish atomically. The browser still exports synchronously.
 ## 0.2.1 critical fixes
 
 - Separated multi-profile Join/Cut extrusions into one solid target batch their tools using
-  conservative construction bounds, avoiding a Boolean rebuild for every profile. Tool
+  conservative construction bounds, avoiding a Boolean rebuild for every profile. Live
   extrusion previews build only their tools; confirmation validates the final Boolean.
 - Coplanar selected body faces share one linked sketch and one extrusion. Desktop OK/Enter
   computes on a scratch session in the background, with atomic acceptance and cancellation.
   Planar section stitching projects lines/arcs analytically and removes duplicate endpoints.
+- Imported rotated face groups can check all full start-face seams in one guarded
+  construction. Separated tools may batch a Join when each meets the same single body;
+  nearby uninvolved bodies retain the original contact decisions. Preview completion
+  requests a frame immediately. Regression comparisons cover all four extrusion operations.
 - Axis view and navigation controls stay anchored to the viewport when feature dialogs or
   the command palette open, at normal and enlarged display scales. Fit still accounts for
   dialog coverage; covered controls do not receive clicks through dialogs.
