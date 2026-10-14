@@ -1597,7 +1597,7 @@ fn apply_traced(state: &mut ModelState, f: &Feature, tools: Vec<Traced>, op: Ope
             }
         }
     }
-    // One affected solid target: batching must preserve Join's absorption order,
+    // Batching solid targets must preserve Join's absorption order,
     // sheet material tracking and the separate bodies of a New Body extrusion.
     if tools.len() > 1
         && matches!(f.kind, FeatureKind::Extrude { .. })
@@ -1615,11 +1615,18 @@ fn apply_traced(state: &mut ModelState, f: &Feature, tools: Vec<Traced>, op: Ope
         };
         // The optimization must not reject geometry the original sequential path can
         // handle. A failed batch leaves the model untouched and retries the original tools.
-        if let Some(name) = target.and_then(|index| state.bodies.get(index)).map(|body| body.name.clone()) {
+        let batch_targets = if op == Operation::Cut {
+            // Subtracting a union equals subtracting its separated tools in order.
+            // Keep ALL original participants; no sampled contact test excludes a body.
+            Some(target_idx.iter().filter_map(|index| state.bodies.get(*index).map(|body| body.name.clone())).collect::<Vec<_>>())
+        } else {
+            target.and_then(|index| state.bodies.get(index)).map(|body| vec![body.name.clone()])
+        };
+        if let Some(names) = batch_targets {
             let mut batched = state.clone();
-            // Keep the original per-tool participant decision. The compound's larger
+            // Preserve the original participants. For Join, the compound's larger
             // size must not expand the contact tolerance and absorb a nearby body.
-            if apply_op(&mut batched, f, vec![compound], op, &[name]).is_ok() {
+            if apply_op(&mut batched, f, vec![compound], op, &names).is_ok() {
                 *state = batched;
                 return Ok(());
             }

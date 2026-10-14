@@ -436,7 +436,7 @@ fn unsupported_face_groups_are_atomic() {
 
 #[test]
 fn imported_rotated_face_extrusions_preserve_other_operations_and_bodies() {
-    use solvecraft_geom::Vec3;
+    use solidcraft_geom::Vec3;
     let mut source = Session::default();
     source.execute("solid.box", &json!({"corner":[-16,-16,-3],"length":32,"width":32,"height":1,"body_name":"Other"})).unwrap();
     source.execute("solid.cylinder", &json!({"radius":14,"height":8,"body_name":"Stock"})).unwrap();

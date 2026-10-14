@@ -4,7 +4,7 @@ use crate::SolveApp;
 use crate::dialogs::Dialog;
 #[cfg(not(target_arch = "wasm32"))]
 use serde_json::Value;
-use solvecraft_engine::{Session, doc::Document};
+use solidcraft_engine::{Session, doc::Document};
 use std::sync::{
     Arc,
     mpsc::{Receiver, TryRecvError},

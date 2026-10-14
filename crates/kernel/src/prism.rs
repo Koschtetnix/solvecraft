@@ -991,6 +991,13 @@ fn inside(regions: &[Region2], p: Vec2) -> bool {
     regions.iter().any(|r| inside_loop(&r.outer, p) && !r.holes.iter().any(|h| inside_loop(h, p)))
 }
 
+/// Call only after proving the point is at least `tol` from the other boundary.
+/// This sub-tolerance interior probe cannot cross that boundary, and avoids casting
+/// exactly through fitted arc/line endpoints whose heights differ by roundoff.
+fn inside_clear(regions: &[Region2], point: Vec2, tol: f64) -> bool {
+    inside(regions, point + Vec2::new(tol * 0.173, tol * 0.317))
+}
+
 fn dist_to(regions: &[Region2], p: Vec2) -> f64 {
     regions
         .iter()
@@ -1513,7 +1520,7 @@ fn boolean2d_arcs(a: &Section, b: &Section, op: BoolOp, tol: f64) -> Option<Sect
                     BoolOp::Cut => !same,
                 }
             } else {
-                let ins = inside(&b, m);
+                let ins = inside_clear(&b, m, tol);
                 match op {
                     BoolOp::Union | BoolOp::Cut => !ins,
                     BoolOp::Intersect => ins,
@@ -1539,7 +1546,7 @@ fn boolean2d_arcs(a: &Section, b: &Section, op: BoolOp, tol: f64) -> Option<Sect
             if near_dist(&sa, &box_a, m) < tol {
                 continue;
             }
-            let ins = inside(&a, m);
+            let ins = inside_clear(&a, m, tol);
             if kept.len() >= MAX_PLANAR_SEGMENTS {
                 return None;
             }
@@ -2509,6 +2516,62 @@ pub(crate) fn prism_union_between_caps(a: &Body, b: &Body, op: BoolOp) -> Option
 #[cfg(test)]
 mod planar_tests {
     use super::*;
+    #[test]
+    fn shared_arc_line_endpoint_roundoff_does_not_open_a_union() {
+        let a = Region2 { outer: Loop2::polygon(&[Vec2::new(-2., 0.), Vec2::new(2., 0.), Vec2::new(2., 2.), Vec2::new(-2., 2.)]), holes: vec![] };
+        let line = |a: (f64, f64), b: (f64, f64)| Seg2::Line { a: Vec2::new(a.0, a.1), b: Vec2::new(b.0, b.1) };
+        for epsilon in [-4e-14, 4e-14] {
+            let b = Region2 {
+                outer: Loop2 {
+                    segs: vec![
+                        line((1.15, epsilon), (-1.15, -epsilon)),
+                        Seg2::Arc { center: Vec2::new(-1.35, epsilon), radius: 0.2, start: 0., sweep: -std::f64::consts::FRAC_PI_2 },
+                        line((-1.35, -0.2), (-2.4, -0.2)),
+                        line((-2.4, -0.2), (-2.4, -1.)),
+                        line((-2.4, -1.), (2.4, -1.)),
+                        line((2.4, -1.), (2.4, -0.2)),
+                        line((2.4, -0.2), (1.35, -0.2)),
+                        Seg2::Arc {
+                            center: Vec2::new(1.35, -epsilon),
+                            radius: 0.2,
+                            start: -std::f64::consts::FRAC_PI_2,
+                            sweep: -std::f64::consts::FRAC_PI_2,
+                        },
+                    ],
+                },
+                holes: vec![],
+            };
+            let result = planar_regions_boolean(std::slice::from_ref(&a), std::slice::from_ref(&b), BoolOp::Union, 1e-5).unwrap();
+            assert_eq!(result.len(), 1);
+            assert!(result[0].outer.is_closed(1e-4));
+            assert!((result[0].area() - a.area() - b.area()).abs() < 1e-6);
+        }
+    }
+    #[test]
+    fn analytic_projection_keeps_clamped_lines_and_wrapped_arcs() {
+        let line = Seg2::Line { a: Vec2::new(2., 3.), b: Vec2::new(5., 7.) };
+        for (point, expected) in [(Vec2::new(-1., -1.), 0.), (Vec2::new(3.5, 5.), 0.5), (Vec2::new(8., 11.), 1.)] {
+            assert!((closest_param(&line, point) - expected).abs() < 1e-12);
+        }
+        for start in [-7., -0.5, 3., 7.] {
+            for sweep in [-std::f64::consts::TAU, -5., -0.2, 0.2, 5., std::f64::consts::TAU] {
+                let arc = Seg2::Arc { center: Vec2::new(2., -3.), radius: 4., start, sweep };
+                for index in 0..128 {
+                    let angle = index as f64 * std::f64::consts::TAU / 128.;
+                    let point = Vec2::new(2., -3.) + Vec2::new(angle.cos(), angle.sin()) * 6.;
+                    let nearest = arc.point_at(closest_param(&arc, point));
+                    // Includes both signs, sweeps over pi, seam crossings and endpoint clamps.
+                    for sample in 0..=128 {
+                        assert!(nearest.dist(point) <= arc.point_at(sample as f64 / 128.).dist(point) + 1e-10);
+                    }
+                }
+                for t in [0., 0.25, 0.5, 0.75, 1.] {
+                    let point = arc.point_at(t);
+                    assert!(arc.point_at(closest_param(&arc, point)).dist(point) < 1e-10);
+                }
+            }
+        }
+    }
     fn rectangle(a: Vec2, b: Vec2) -> Region2 {
         Region2 { outer: Loop2::polygon(&[a, Vec2::new(b.x, a.y), b, Vec2::new(a.x, b.y)]), holes: vec![] }
     }

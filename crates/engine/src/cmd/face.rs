@@ -141,7 +141,7 @@ pub(super) fn sketch_of_faces(s: &mut Session, points: &[Vec3], cmd: &str, face_
         if !point.is_finite() {
             return Err(bad(cmd, "faces must be finite points"));
         }
-        let (mesh, index, distance, name) = face_at_in(s, point, face_body).ok_or_else(|| bad(cmd, "no body face at a selected point"))?;
+        let (mesh, index, distance, name) = face_at_in(s, point, face_body).map_err(|_| bad(cmd, "ambiguous face; specify face_body"))?.ok_or_else(|| bad(cmd, "no body face at a selected point"))?;
         let body = state.body(&name).ok_or_else(|| bad(cmd, "selected body disappeared"))?;
         let plane = body.body.planar_face(index as usize).ok_or_else(|| bad(cmd, "faces must be planar"))?;
         let tolerance = (body.body.size() * 1e-9).max(1e-8);

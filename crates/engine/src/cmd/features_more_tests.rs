@@ -28,6 +28,43 @@ fn volume(s: &mut Session) -> f64 {
     measure(s)["total"]["volume_mm3"].as_f64().unwrap_or(f64::NAN)
 }
 
+#[test]
+fn separated_profile_cut_preserves_participants_and_removes_only_consumed_bodies() {
+    for explicit in [false, true] {
+        let mut s = Session::default();
+        for (name, x) in [("A", 0), ("B", 10), ("C", 30)] {
+            run(&mut s, "solid.box", json!({"length":5,"width":5,"height":10,"corner":[x,0,0],"body_name":name}));
+        }
+        run(&mut s, "sketch.create", json!({"plane":"XY","name":"Cutters"}));
+        for (a, b) in [([-1, -1], [6, 6]), ([12, 2], [14, 4]), ([32, 2], [34, 4])] {
+            run(&mut s, "sketch.rectangle.two_point", json!({"p0":a,"p1":b}));
+        }
+        run(&mut s, "sketch.finish", json!({}));
+        let before = s.doc.to_json();
+        let mut params = json!({"sketch":"Cutters","profiles":"all","distance":10,"operation":"cut"});
+        if explicit {
+            params["participants"] = json!(["A", "B"]);
+        }
+        run(&mut s, "solid.extrude", params);
+        let check = |session: &Session| {
+            let state = session.model.state();
+            assert_eq!(state.bodies.len(), 2);
+            assert!(state.body("A").is_none());
+            for (name, expected) in [("B", 210.), ("C", if explicit { 250. } else { 210. })] {
+                let body = &state.body(name).unwrap().body;
+                assert!((solidcraft_kernel::measure(body).unwrap().volume - expected).abs() < 1e-6);
+                assert!(body.validity().is_empty());
+            }
+        };
+        check(&s);
+        check(&Session::new(solidcraft_doc::Document::from_json(&s.doc.to_json()).unwrap()));
+        run(&mut s, "edit.undo", json!({}));
+        assert_eq!(s.doc.to_json(), before);
+        run(&mut s, "edit.redo", json!({}));
+        check(&s);
+    }
+}
+
 fn rel(a: f64, b: f64) -> f64 {
     (a - b).abs() / b.abs().max(1e-12)
 }

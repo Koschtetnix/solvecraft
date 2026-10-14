@@ -284,6 +284,10 @@ completed drawings publish atomically. The browser still exports synchronously.
   construction. Separated tools may batch a Join when each meets the same single body;
   nearby uninvolved bodies retain the original contact decisions. Preview completion
   requests a frame immediately. Regression comparisons cover all four extrusion operations.
+- Inward multi-face cuts retain every eligible target and subtract separated tools together.
+  Safe interior classification handles roundoff at shared imported line/arc endpoints.
+  Straight extrusion feedback caches existing face/profile triangles and updates the display
+  directly; other extents, components and curved sketch profiles keep the Engine preview.
 - Axis view and navigation controls stay anchored to the viewport when feature dialogs or
   the command palette open, at normal and enlarged display scales. Fit still accounts for
   dialog coverage; covered controls do not receive clicks through dialogs.
