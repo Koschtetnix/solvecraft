@@ -1217,10 +1217,16 @@ fn glue_impl(a: &Body, b: &Body, all_caps: bool) -> Option<Result<Body>> {
     if all_caps {
         for shell in b.solid.boundaries() {
             let mut bounds = solidcraft_geom::Aabb3::EMPTY;
-            for vertex in shell.vertex_iter() { bounds.add(from_p3(vertex.point())); }
+            for vertex in shell.vertex_iter() {
+                bounds.add(from_p3(vertex.point()));
+            }
             let size = bounds.diagonal();
-            if !size.is_finite() { return None; }
-            for face in shell.face_iter() { tool_sizes.insert(face.id(), size); }
+            if !size.is_finite() {
+                return None;
+            }
+            for face in shell.face_iter() {
+                tool_sizes.insert(face.id(), size);
+            }
         }
     }
     let fa_list: Vec<&mt::Face> = a.solid.face_iter().collect();
@@ -1229,13 +1235,19 @@ fn glue_impl(a: &Body, b: &Body, all_caps: bool) -> Option<Result<Body>> {
     let mut map: HashMap<mt::EdgeID, mt::Edge> = HashMap::new();
     let mut vmap: HashMap<mt::VertexID, mt::Vertex> = HashMap::new();
     let (mut glued_a, mut glued_b): (Vec<usize>, Vec<usize>) = (Vec::new(), Vec::new());
-    if all_caps && pa.len().saturating_mul(pb.len()) > 2_000_000 { return None; }
+    if all_caps && pa.len().saturating_mul(pb.len()) > 2_000_000 {
+        return None;
+    }
     for (ia, x) in &pa {
         for (ib, y) in &pb {
-            if all_caps && !matches!(b.face_sources().and_then(|sources| sources.get(*ib)), Some(Some(crate::FaceSource::ExtrudeCap { high: false, .. }))) { continue; }
+            if all_caps
+                && !matches!(b.face_sources().and_then(|sources| sources.get(*ib)), Some(Some(crate::FaceSource::ExtrudeCap { high: false, .. })))
+            {
+                continue;
+            }
             let tol = if all_caps { (a.size().max(*tool_sizes.get(&fb_list.get(*ib)?.id())?) * 1e-7).max(1e-9) * 10.0 } else { tol };
             let key = |p: Vec3| ((p.x / tol).round() as i64, (p.y / tol).round() as i64, (p.z / tol).round() as i64);
-                    if glued_a.contains(ia) || glued_b.contains(ib) || x.n.dot(y.n) > -1.0 + 1e-9 || (x.d + y.d).abs() > tol {
+            if glued_a.contains(ia) || glued_b.contains(ib) || x.n.dot(y.n) > -1.0 + 1e-9 || (x.d + y.d).abs() > tol {
                 continue;
             }
             let (Some(fa), Some(fb)) = (fa_list.get(*ia), fb_list.get(*ib)) else { continue };
@@ -1286,7 +1298,14 @@ fn glue_impl(a: &Body, b: &Body, all_caps: bool) -> Option<Result<Body>> {
             glued_b.push(*ib);
         }
     }
-    if all_caps && b.face_sources()?.iter().enumerate().any(|(index, source)| matches!(source, Some(crate::FaceSource::ExtrudeCap { high: false, .. })) && !glued_b.contains(&index)) { return None; }
+    if all_caps
+        && b.face_sources()?
+            .iter()
+            .enumerate()
+            .any(|(index, source)| matches!(source, Some(crate::FaceSource::ExtrudeCap { high: false, .. })) && !glued_b.contains(&index))
+    {
+        return None;
+    }
     if glued_a.is_empty() {
         return None;
     }

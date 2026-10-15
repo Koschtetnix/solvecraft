@@ -288,6 +288,10 @@ completed drawings publish atomically. The browser still exports synchronously.
   Safe interior classification handles roundoff at shared imported line/arc endpoints.
   Straight extrusion feedback caches existing face/profile triangles and updates the display
   directly; other extents, components and curved sketch profiles keep the Engine preview.
+- The extrusion fixes are integrated with the current `solidcraft` packages and tracked
+  Boolean history. A rolling-ball fillet refuses a cylindrical wall whose boundary control
+  hull loses all axial extent, preserving smaller valid radii and avoiding an unmeshable face.
+  Appearance-library export builds on wasm; feature-walk coverage accepts Windows line endings.
 - Axis view and navigation controls stay anchored to the viewport when feature dialogs or
   the command palette open, at normal and enlarged display scales. Fit still accounts for
   dialog coverage; covered controls do not receive clicks through dialogs.

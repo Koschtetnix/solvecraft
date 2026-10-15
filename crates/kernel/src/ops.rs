@@ -141,19 +141,30 @@ pub fn compound_disjoint_extrusions(tools: &[Body]) -> Result<Option<Body>> {
                     .map(|(face, source)| (face.id(), (face.orientation(), source.clone())))
             })
             .collect();
-        join_pieces(tools.to_vec()).map(|body| {
-            body.map(|body| {
-                // Only unchanged face identities carry these transient tool witnesses.
-                // No whole-compound extrusion/producer certificate is created.
-                let mapped = body
-                    .solid
-                    .face_iter()
-                    .map(|face| {
-                        sources.get(&face.id()).filter(|(orientation, _)| *orientation == face.orientation()).and_then(|(_, source)| source.clone())
-                    })
-                    .collect();
-                body.with_face_sources(Some(std::sync::Arc::new(mapped)))
-            })
+        let operands: Vec<_> = tools.iter().collect();
+        let shells = tools.iter().flat_map(|tool| tool.solid.boundaries().clone()).collect();
+        let solid = Solid::try_new(shells).map_err(|error| KernelError::Failed(format!("extrusion compound: {error}")))?;
+        let faces = tools
+            .iter()
+            .enumerate()
+            .flat_map(|(operand, tool)| (0..tool.face_count()).map(move |face| record::from_face(operand, face, crate::history::Change::Kept)))
+            .collect();
+        let mut edges = HashMap::new();
+        for (operand, tool) in tools.iter().enumerate() {
+            edges.extend(record::edge_origins(&tool.solid, operand));
+        }
+        record::build(solid, &record::counts(&operands), Some(faces), Some(&edges)).map(|mut body| {
+            body.regularization_protected = tools.iter().any(|tool| tool.regularization_protected);
+            // Only unchanged face identities carry these transient tool witnesses.
+            // No whole-compound extrusion/producer certificate is created.
+            let mapped = body
+                .solid
+                .face_iter()
+                .map(|face| {
+                    sources.get(&face.id()).filter(|(orientation, _)| *orientation == face.orientation()).and_then(|(_, source)| source.clone())
+                })
+                .collect();
+            Some(body.with_face_sources(Some(std::sync::Arc::new(mapped))))
         })
     })
 }
@@ -439,6 +450,7 @@ mod shortcut_tests {
         let tools = crate::extrude(&plane, &[rectangle(0.0), rectangle(20.0)], -1.0, 5.0).unwrap();
         let compound = compound_disjoint_extrusions(&tools).unwrap().unwrap();
         assert_eq!(compound.shell_count(), 2);
+        assert_eq!(compound.history().unwrap().operands, 2);
         assert!((crate::measure(&compound).unwrap().volume - 48.0).abs() < 1e-8);
         assert!(compound.validity().is_empty());
         for x in [1.0, 2.0, 2.000_000_1] {

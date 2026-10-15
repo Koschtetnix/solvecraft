@@ -1522,14 +1522,15 @@ fn apply_beside_sheet_cut(st: &mut ModelState, f: &Feature, tools: Vec<Traced>, 
 
 /// Only one target meets every separated tool. A tool with no contact must retain
 /// Join's first-target fallback; tools touching different targets must retain absorption order.
-fn common_join_target(state: &ModelState, indices: &[usize], tools: &[Body]) -> Result<Option<usize>> {
+fn common_join_target(state: &ModelState, indices: &[usize], tools: &[Traced]) -> Result<Option<usize>> {
     if indices.len() > 64 {
         return Ok(None);
     }
+    let bodies: Vec<_> = tools.iter().map(|tool| tool.body.clone()).collect();
     let mut contacts = vec![None; tools.len()];
     for &index in indices {
         let body = state.bodies.get(index).ok_or_else(|| DocError::Invalid("join target disappeared".into()))?;
-        for (contact, meets) in contacts.iter_mut().zip(body.body.meets_each(tools)?) {
+        for (contact, meets) in contacts.iter_mut().zip(body.body.meets_each(&bodies)?) {
             if meets {
                 if contact.is_some() {
                     return Ok(None);
@@ -1604,7 +1605,7 @@ fn apply_traced(state: &mut ModelState, f: &Feature, tools: Vec<Traced>, op: Ope
         && matches!(op, Operation::Join | Operation::Cut)
         && !target_idx.is_empty()
         && target_idx.iter().all(|i| state.bodies.get(*i).is_some_and(|b| !b.body.is_mesh() && !state.sheets.iter().any(|s| s.body == b.name)))
-        && let Ok(Some(compound)) = kernel::compound_disjoint_extrusions(&tools)
+        && let Ok(Some(compound)) = kernel::compound_disjoint_extrusions(&tools.iter().map(|tool| tool.body.clone()).collect::<Vec<_>>())
     {
         let target = if target_idx.len() == 1 {
             target_idx.first().copied()
@@ -1626,7 +1627,7 @@ fn apply_traced(state: &mut ModelState, f: &Feature, tools: Vec<Traced>, op: Ope
             let mut batched = state.clone();
             // Preserve the original participants. For Join, the compound's larger
             // size must not expand the contact tolerance and absorb a nearby body.
-            if apply_op(&mut batched, f, vec![compound], op, &names).is_ok() {
+            if apply_traced(&mut batched, f, vec![Traced::step(compound, &tools.iter().collect::<Vec<_>>())], op, &names).is_ok() {
                 *state = batched;
                 return Ok(());
             }
@@ -3034,7 +3035,13 @@ fn feature_tools_with_constructor(
                 && ss.sketch.links.len() > 1
                 && ss.sketch.links.iter().all(|link| matches!(&link.source, solidcraft_sketch::LinkSource::Face { .. }))
             {
-                let exact = regions.iter().map(|region| centered_extrude(&ss.plane, region, lo + off, hi + off, Some(&ss))).collect::<Result<Vec<_>>>()?.into_iter().flatten().collect::<Vec<_>>();
+                let exact = regions
+                    .iter()
+                    .map(|region| centered_extrude(&ss.plane, region, lo + off, hi + off, Some(&ss)))
+                    .collect::<Result<Vec<_>>>()?
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>();
                 if let Ok(Some(compound)) = kernel::compound_disjoint_extrusions(&exact.iter().map(|tool| tool.body.clone()).collect::<Vec<_>>())
                     && st
                         .bodies
