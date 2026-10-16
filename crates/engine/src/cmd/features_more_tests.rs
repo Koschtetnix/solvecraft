@@ -2,6 +2,63 @@ use serde_json::{Value, json};
 
 use crate::Session;
 
+#[test]
+fn grouped_face_auto_operation_keeps_implicit_and_explicit_participants() {
+    let mut s = Session::default();
+    let part = run(&mut s, "component.create", json!({"name":"Part"}));
+    run(&mut s, "solid.box", json!({"length":10,"width":10,"height":10,"body_name":"Stock"}));
+    run(&mut s, "component.activate", json!({"component":0}));
+    for offset in [0., 30.] {
+        if offset != 0. {
+            run(&mut s, "occurrence.move", json!({"occurrence":part["occurrence"],"translate":[offset,0,0]}));
+        }
+        // To Object follows the target's side, even when the distance and
+        // direction fields still describe the opposite extrusion.
+        for (height, expected) in [(8., "cut"), (12., "join")] {
+            let params = json!({"faces":[[offset+2.,2,10],[offset+8.,8,10]],"face_body":"Stock",
+                "to":[offset+5.,5,height],"direction":"negative"});
+            assert_eq!(crate::auto_operation(&s, &params), Some(expected));
+        }
+        for distance in [-2., 2.] {
+            let mut params = json!({"faces":[[offset+2.,2,10],[offset+8.,8,10]],"distance":distance});
+            let expected = if distance < 0. { "cut" } else { "join" };
+            assert_eq!(crate::auto_operation(&s, &params), Some(expected));
+            params["face_body"] = json!("Stock");
+            assert_eq!(crate::auto_operation(&s, &params), Some(expected));
+            let mut actual = s.scratch();
+            if offset != 0. {
+                run(&mut actual, "component.activate", json!({"component":part["component"]}));
+            }
+            params["operation"] = json!("auto");
+            let made = run(&mut actual, "solid.extrude", params);
+            let body = actual.model.state().body("Stock").unwrap().body.clone();
+            let volume = solidcraft_kernel::measure(&body).unwrap().volume;
+            assert!(
+                (volume - (1000. + 100. * distance)).abs() < 1e-6,
+                "offset={offset}, distance={distance}, volume={volume}, feature={:?}",
+                actual.doc.feature(made["feature"].as_u64().unwrap())
+            );
+        }
+        if offset != 0. {
+            // Outside the edited component, grouping keeps the original explicit
+            // face command's coordinate and participant behavior.
+            let mut grouped = s.scratch();
+            let mut single = s.scratch();
+            run(&mut grouped, "solid.extrude", json!({"faces":[[32,2,10],[38,8,10]],"face_body":"Stock","distance":-2,"operation":"cut"}));
+            run(&mut single, "solid.extrude", json!({"face":[32,2,10],"face_body":"Stock","distance":-2,"operation":"cut"}));
+            let volume = |session: &Session| solidcraft_kernel::measure(&session.model.state().body("Stock").unwrap().body).unwrap().volume;
+            assert!((volume(&grouped) - volume(&single)).abs() < 1e-6);
+        }
+    }
+    run(&mut s, "solid.box", json!({"corner":[100,0,0],"length":10,"width":10,"height":10,"body_name":"Other"}));
+    let mut params = json!({"faces":[[32,2,10],[38,8,10]],"face_body":"Stock","distance":-2});
+    assert_eq!(crate::auto_operation(&s, &params), Some("join"), "an existing active-component body keeps its original participant scope");
+    params["participants"] = json!(["Stock"]);
+    assert_eq!(crate::auto_operation(&s, &params), Some("cut"));
+    params["participants"] = json!(["Other"]);
+    assert_eq!(crate::auto_operation(&s, &params), Some("join"));
+}
+
 fn run(s: &mut Session, id: &str, p: Value) -> Value {
     match s.execute(id, &p) {
         Ok(v) => v,

@@ -461,7 +461,7 @@ fn imported_rotated_face_extrusions_preserve_other_operations_and_bodies() {
     source.execute("solid.extrude", &json!({"distance":4,"operation":"join"})).unwrap();
     // An original public-safe STEP example, with rotated full-face seams and a
     // curved target. No vendor/user design is part of this regression.
-    let path = std::env::temp_dir().join(format!("solvecraft-face-extrusion-{}.step", std::process::id()));
+    let path = std::env::temp_dir().join(format!("solidcraft-face-extrusion-{}.step", std::process::id()));
     source.execute("file.export", &json!({"path":path.to_string_lossy()})).unwrap();
     let mut imported = Session::default();
     imported.execute("doc.open", &json!({"path":path.to_string_lossy()})).unwrap();

@@ -84,6 +84,10 @@ type FacePick = (std::sync::Arc<Mesh>, u32, f64, String);
 /// equally near (bodies touching flush), the pick is ambiguous: `Err` names those bodies.
 fn face_at_in(s: &Session, p: Vec3, only: Option<&str>) -> std::result::Result<Option<FacePick>, Vec<String>> {
     let st = s.model.state();
+    face_at_state(&st, p, only)
+}
+
+pub(super) fn face_at_state(st: &solidcraft_doc::ModelState, p: Vec3, only: Option<&str>) -> std::result::Result<Option<FacePick>, Vec<String>> {
     let mut best: Option<FacePick> = None;
     let mut tied: Vec<String> = Vec::new();
     for b in st.bodies.iter().filter(|b| only.is_none_or(|n| b.name == n)) {

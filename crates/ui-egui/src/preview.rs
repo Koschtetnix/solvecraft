@@ -100,7 +100,7 @@ pub struct PreviewState {
 }
 
 impl PreviewState {
-    pub(crate) fn clear(&mut self) {
+    fn clear(&mut self) {
         self.straight.clear();
         self.running = None;
         self.running_tool = false;
@@ -435,7 +435,10 @@ pub(crate) fn extrusion_target_error(s: &Session, cmds: &[(String, Value)], befo
                 }
             }
         } else {
-            found = before.bodies.iter().any(|body| s.doc.model_body_component(body) == s.active_component);
+            found = params.get("faces").and_then(|_| params.get("face_body")).and_then(Value::as_str).map_or_else(
+                || before.bodies.iter().any(|body| s.doc.model_body_component(body) == s.active_component),
+                |name| s.world_state().body(name).is_some(),
+            );
         }
         if !found && matches!(op, "cut" | "intersect") {
             return Some("there is no body to cut or intersect".into());

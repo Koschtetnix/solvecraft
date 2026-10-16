@@ -46,12 +46,12 @@ worse, so a kernel change shows every seed it moves. Pull requests that touch `c
 run every 8th seed (`sample_0` … `sample_3`, about two minutes); pushes to `main` and the
 nightly run them all (`all_0` … `all_3`).
 
-Explicit `platforms.<os>.seeds` records override only those seeds on that operating
-system; every other seed uses the shared record with the same strict tolerances.
-The five Windows entries were independently replayed on unmodified main `229de148`
-before the extrusion rebase and reproduced its existing results exactly. Recording
-on a platform with such entries updates that platform's changed seeds and preserves
-the shared records.
+Explicit `platforms.<os>.seeds` records override only the listed seeds on that
+operating system; all other seeds keep the shared records and strict tolerances.
+The first four Windows records were independently reproduced on unmodified main
+`1e984c8e`; seed 94 was independently reproduced on unmodified main `c5992386`
+after the extrusion rebase. Both match the extrusion branch. Recording on a platform
+with such entries updates its changed seeds and preserves shared references.
 
 To record an intended change, give the reason:
 

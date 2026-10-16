@@ -278,7 +278,6 @@ fn dispatch(app: &mut SolveApp, ctx: &egui::Context, method: &str, p: &Value) ->
             "build_ms": app.viewport.build_ms,
             "display_lod": app.viewport.lod.lock().map(|l| serde_json::to_value(&l.stats).unwrap_or_default()).unwrap_or_default(),
             "preview": {"active": app.preview.active, "busy": app.preview.busy, "error": app.preview.error, "ms": app.preview.ms, "replaced": app.preview.replaced},
-            "extrude_busy": app.extrude_run.busy(),
             "home": app.home.open,
             "recent_thumbnails_ready": app.home.ready_recents(),
             "documents": app.docs.count(),

@@ -221,14 +221,10 @@ impl Harness {
     pub fn settle(&mut self) {
         for _ in 0..2000 {
             // Queued input used up and the view no longer moving.
-            if self.app.synthetic.is_empty() && self.app.cam_anim.is_none() && self.app.viewport.orbit_snap.is_none() && !self.app.extrude_run.busy()
-            {
+            if self.app.synthetic.is_empty() && self.app.cam_anim.is_none() && self.app.viewport.orbit_snap.is_none() {
                 break;
             }
             self.frame();
-            if self.app.extrude_run.busy() {
-                std::thread::sleep(std::time::Duration::from_millis(1));
-            }
         }
         // A file opening or recovering in the background: wait for it (as a person would).
         let began = std::time::Instant::now();

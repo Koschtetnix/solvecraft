@@ -3745,7 +3745,10 @@ fn dialog_commands(app: &SolveApp, d: &Dialog) -> Result<Vec<(String, Value)>, S
                     group = Some((body.clone(), plane, vec![pt(*point)]));
                 }
             }
-            if coplanar && let Some((body, _, points)) = group && points.len() > 1 {
+            if coplanar
+                && let Some((body, _, points)) = group
+                && points.len() > 1
+            {
                 out.push(("solid.extrude".to_string(), with(json!({"faces": points, "face_body": body}))));
                 return Ok(out);
             }

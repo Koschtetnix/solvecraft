@@ -98,7 +98,6 @@ mod expression_complete;
 #[cfg(test)]
 mod extrude_edit_tests;
 mod extrude_preview;
-mod extrude_run;
 mod file_load;
 mod file_picker;
 #[cfg(test)]
@@ -395,7 +394,6 @@ pub struct SolveApp {
     /// The start page.
     pub home: home::HomeState,
     pub file_load: file_load::FileLoad,
-    pub(crate) extrude_run: extrude_run::ExtrudeRun,
     /// The other open designs (tabs).
     pub docs: documents::Documents,
     /// The language the installed font fallback chain is ordered for (`fonts::fallback_order`);
@@ -486,7 +484,6 @@ impl SolveApp {
             flat_view: Default::default(),
             home: home::HomeState::default(),
             file_load: file_load::FileLoad::default(),
-            extrude_run: Default::default(),
             docs: documents::Documents::default(),
             applied_fonts_language: "en".into(),
             applied_ui_font: String::new(),
@@ -623,9 +620,6 @@ impl SolveApp {
 
     /// Run a command programmatically (JSON parameters, no dialogs).
     pub fn run(&mut self, id: &str, params: Value) -> Result<Value, String> {
-        if self.extrude_run.busy() && !id.starts_with("inspect.") && !matches!(id, "document.inspect" | "engine.commands") {
-            return Err("an extrusion is being computed; wait or cancel it first".into());
-        }
         if self.file_load.busy() || self.file_picker.is_some() {
             return Err("a file operation is in progress".into());
         }
@@ -707,10 +701,6 @@ impl SolveApp {
     /// Start a command the way a toolbar click does: interactive tools and dialogs for commands
     /// that have them, otherwise run it with defaults.
     pub fn start(&mut self, id: &str) {
-        if self.extrude_run.busy() {
-            self.set_status("an extrusion is being computed; wait or cancel it first", true);
-            return;
-        }
         // A file is loading: the design waits for it.
         if self.file_load.busy() || self.file_picker.is_some() {
             return;
@@ -1240,7 +1230,6 @@ impl SolveApp {
 
     /// Per-frame logic before layout.
     pub fn logic(&mut self, ctx: &egui::Context) {
-        extrude_run::tick(self, ctx);
         file_picker::tick(self, ctx);
         render_workspace::sync_backend(self);
         render_workspace::tick(self, ctx);

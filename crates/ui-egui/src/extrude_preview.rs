@@ -44,10 +44,20 @@ impl StraightPreview {
             "timeline.redefine" if params.get("command").and_then(Value::as_str) == Some("solid.extrude") => params.get("params")?,
             _ => return None,
         };
-        // Other extents and component authoring keep the existing Engine preview.
-        if app.session.active_component != 0
-            || app.session.active_occurrence_path.is_some()
-            || app.session.doc.units != "mm"
+        // A newly opened STEP is now a component. Its single identity placement
+        // has the same authoring coordinates; other placements keep Engine preview.
+        if app.session.active_component != 0 || app.session.active_occurrence_path.is_some() {
+            let path = app.session.active_occurrence_path.as_ref()?;
+            let placed = app.session.occurrence_placement(path).ok()?;
+            if path.len() != 1
+                || placed.component != app.session.active_component
+                || placed.world != solidcraft_engine::doc::IDENTITY
+                || app.session.doc.occurrences.iter().filter(|o| o.component == placed.component).count() != 1
+            {
+                return None;
+            }
+        }
+        if app.session.doc.units != "mm"
             || ["distance2", "start_offset", "from", "to", "to_offset", "thin"].iter().any(|key| params.get(*key).is_some())
             || params.get("through_all").and_then(Value::as_bool) == Some(true)
         {
@@ -130,6 +140,7 @@ impl StraightPreview {
             scene,
             sketches: Vec::new(),
             applied: None,
+            stopped: None,
             tapered: Vec::new(),
             replaced: Vec::new(),
             error: crate::preview::extrusion_target_error(&app.session, commands, &app.session.model.state()),
@@ -330,6 +341,27 @@ mod tests {
         commands[0].1 = json!({"distance":2,"taper":"3deg"});
         assert!(preview.compute(&harness.app, &commands, colors).is_none());
     }
+    #[test]
+    fn identity_component_feedback_skips_moved_and_repeated_placements() {
+        let mut h = Harness::new();
+        let made = h.app.run("component.create", json!({"name":"Imported part"})).unwrap();
+        h.app.run("solid.box", json!({"length":4,"width":3,"height":5,"body_name":"Stock"})).unwrap();
+        let world = h.app.session.world_state();
+        let face =
+            world.body("Stock").unwrap().body.faces(0.001).unwrap().into_iter().find(|face| face.plane_normal.is_some_and(|n| n.z > 0.99)).unwrap();
+        h.app.session.selection = vec![Sel::Face { body: "Stock".into(), index: face.index, point: face.centroid }];
+        h.app.start("solid.extrude");
+        let commands = crate::dialogs::apply_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
+        let colors = Colors::from_tokens(&crate::theme::Tokens::get());
+        let mut preview = StraightPreview::default();
+        assert!(preview.compute(&h.app, &commands, colors).unwrap().is_ok());
+        h.app.run("occurrence.move", json!({"occurrence":made["occurrence"],"translate":[20,0,0]})).unwrap();
+        assert!(preview.compute(&h.app, &commands, colors).is_none());
+        h.app.run("occurrence.move", json!({"occurrence":made["occurrence"],"translate":[-20,0,0]})).unwrap();
+        h.app.run("occurrence.copy", json!({"component":made["component"],"translate":[30,0,0]})).unwrap();
+        assert!(preview.compute(&h.app, &commands, colors).is_none());
+    }
+
     #[test]
     fn profile_feedback_keeps_holes_and_skips_unsupported_curves() {
         let mut harness = Harness::new();

@@ -166,19 +166,38 @@ const START_PROBE_MM: f64 = 0.1;
 /// direction it grows, or halfway along it. With the halfway point alone, a cut dragged far
 /// past a body's far side read as a Join (#1257).
 pub fn auto_operation(s: &Session, p: &Value) -> Option<&'static str> {
-    let d = extrude_reach(s, p)?;
+    auto_operation_in(s, p, true)
+}
+
+fn auto_operation_in(s: &Session, p: &Value, world_faces: bool) -> Option<&'static str> {
     let symmetric = p.get("to").is_none() && str_(p, "direction").is_some_and(|d| d.eq_ignore_ascii_case("symmetric"));
-    let (base, n) = extrude_base(s, p)?;
-    let st = s.model.state();
+    // Imported face groups can belong to a child of an empty active component.
+    // Probe in the same coordinate frame as the face picks.
+    let grouped = p.get("faces").and_then(Value::as_array).and_then(|faces| faces.first()).and_then(vec3);
+    let st = if grouped.is_some() && world_faces { s.world_state() } else { s.model.state() };
+    let (base, n) = if let Some(point) = grouped {
+        let (mesh, index, distance, name) = super::face::face_at_state(&st, point, str_(p, "face_body")).ok().flatten()?;
+        if distance > (mesh.bounds().diagonal() * 1e-3).max(1e-3) * 10.0 {
+            return None;
+        }
+        let normal = st.body(&name)?.body.planar_face(index as usize)?.normal();
+        (point, normal)
+    } else {
+        extrude_base(s, p)?
+    };
+    let d = if grouped.is_some() && p.get("to").is_some() { (p.get("to").and_then(vec3)? - base).dot(n) } else { extrude_reach(s, p)? };
     if st.bodies.is_empty() || !d.is_finite() {
         return Some("new");
     }
-    // Only the active component's bodies take part (or the ones named as participants).
+    // Match the evaluator's implicit participants: a grouped cut from an empty
+    // assembly component considers every body; otherwise keep the active scope.
+    // Explicit participants override either default.
     let parts = string_list(p, "participants");
+    let implicit_all = grouped.is_some() && !st.bodies.iter().any(|body| s.doc.model_body_component(body) == s.active_component);
     let bodies: Vec<_> = st
         .bodies
         .iter()
-        .filter(|b| if parts.is_empty() { s.doc.model_body_component(b) == s.active_component } else { parts.contains(&b.name) })
+        .filter(|b| if parts.is_empty() { implicit_all || s.doc.model_body_component(b) == s.active_component } else { parts.contains(&b.name) })
         .collect();
     if bodies.is_empty() {
         return Some("new");
@@ -469,7 +488,8 @@ fn add_feature_in(s: &mut Session, p: &Value, kind: FeatureKind, world: bool) ->
     // takes part in every body instead, which it changes only where it meets them.
     let participants = if participants.is_empty()
         && !primitive
-        && matches!(str_(p, "operation").and_then(Operation::parse), Some(Operation::Cut | Operation::Intersect))
+        && (matches!(str_(p, "operation").and_then(Operation::parse), Some(Operation::Cut | Operation::Intersect))
+            || p.get("faces").is_some() && matches!(&kind, FeatureKind::Extrude { operation: Operation::Cut | Operation::Intersect, .. }))
         && {
             let st = s.model.state();
             !st.bodies.is_empty() && !st.bodies.iter().any(|b| s.doc.model_body_component(b) == s.active_component)
@@ -582,7 +602,7 @@ fn extrude(s: &mut Session, p: &Value) -> Result<Value> {
         _ => None,
     };
     let operation = match str_(p, "operation") {
-        Some(o) if o.eq_ignore_ascii_case("auto") => Operation::parse(auto_operation(s, p).unwrap_or("new")).unwrap_or(Operation::NewBody),
+        Some(o) if o.eq_ignore_ascii_case("auto") => Operation::parse(auto_operation_in(s, p, false).unwrap_or("new")).unwrap_or(Operation::NewBody),
         _ => operation(p, cmd)?,
     };
     let mut targets = string_list(p, "targets");

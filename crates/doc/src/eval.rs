@@ -3046,7 +3046,7 @@ fn feature_tools_with_constructor(
                     && st
                         .bodies
                         .iter()
-                        .filter(|body| targets.is_empty() || targets.contains(&body.name))
+                        .filter(|body| plain_targets.is_empty() || plain_targets.contains(&body.name))
                         .any(|body| kernel::can_join_all_touching_faces(&body.body, &compound))
                 {
                     tools = exact;
