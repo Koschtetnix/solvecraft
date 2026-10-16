@@ -662,7 +662,7 @@ mod tests {
                     continue;
                 }
                 scanned += 1;
-                let text = std::fs::read_to_string(&path).unwrap();
+                let text = std::fs::read_to_string(&path).unwrap().replace("\r\n", "\n");
                 // In-file unit tests set cameras up directly; only the code above them counts.
                 let code = text.split("\n#[cfg(test)]\nmod ").next().unwrap_or_default();
                 for (n, line) in code.lines().enumerate() {
