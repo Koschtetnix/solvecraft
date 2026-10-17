@@ -202,8 +202,8 @@ impl Mapper<'_> {
     fn make_expr(&mut self, m: &Mat, v: &Value) -> Option<Value> {
         let a = v.as_array().filter(|a| a.len() == 3)?;
         let c = |i: usize| match a.get(i)? {
-            Value::Number(n) => n.as_f64().filter(|x| x.is_finite()).map(|x| format!("{x}")),
-            Value::String(e) => Some(e.clone()),
+            Value::Number(n) => n.as_f64().filter(|x| x.is_finite()).map(|x| solidcraft_doc::Expr::new(format!("{x}"))),
+            Value::String(e) => Some(solidcraft_doc::Expr::new(e.as_str())),
             _ => None,
         };
         let mut p = [c(0)?, c(1)?, c(2)?];
@@ -351,9 +351,9 @@ pub fn to_local(s: &Session, id: &str, params: &Value) -> Option<Value> {
             && let solidcraft_doc::FeatureKind::Revolve { axis: solidcraft_doc::AxisRef::Line { origin, dir }, .. } = &feature.kind
         {
             let frame = context.active_component_frame();
-            let displayed = serde_json::json!({"origin":pt(apply_point(&frame,*origin)),"dir":pt(apply_vector(&frame,*dir))});
+            let displayed = serde_json::json!({"origin":pt(apply_point(&frame,origin.0)),"dir":pt(apply_vector(&frame,dir.0))});
             if params.get("params").and_then(|p| p.get("axis")) == Some(&displayed) {
-                inner["axis"] = serde_json::json!({"origin":pt(*origin),"dir":pt(*dir)});
+                inner["axis"] = serde_json::json!({"origin":pt(origin.0),"dir":pt(dir.0)});
             }
         }
         let points = match (&feature.kind, cmd) {
@@ -363,9 +363,9 @@ pub fn to_local(s: &Session, id: &str, params: &Value) -> Option<Value> {
         };
         for (key, point) in points {
             if let Some(point) = point {
-                let displayed = pt(apply_point(&context.active_component_frame(), point));
+                let displayed = pt(apply_point(&context.active_component_frame(), point.0));
                 if params.get("params").and_then(|p| p.get(key)) == Some(&displayed) {
-                    inner[key] = pt(point);
+                    inner[key] = pt(point.0);
                 }
             }
         }

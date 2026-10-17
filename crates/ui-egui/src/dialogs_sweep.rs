@@ -3,7 +3,7 @@
 
 use serde_json::{Value, json};
 use solidcraft_engine::Sel;
-use solidcraft_engine::doc::{Mat, SweepOrientation};
+use solidcraft_engine::doc::{Expr, Mat, SweepOrientation};
 use solidcraft_engine::geom::Vec3;
 
 use crate::SolveApp;
@@ -40,10 +40,10 @@ impl SweepOpts {
     /// A feature's stored options as dialog values; `frame` maps the feature's component frame to
     /// the world (a stored direction is in the component's frame). A direction along an origin
     /// axis comes back as a pick of that axis.
-    pub fn of(orientation: &SweepOrientation, twist: &Option<String>, scale: &Option<String>, frame: &Mat) -> (SweepOpts, Option<Sel>) {
+    pub fn of(orientation: &SweepOrientation, twist: &Option<Expr>, scale: &Option<Expr>, frame: &Mat) -> (SweepOpts, Option<Sel>) {
         let mut o = SweepOpts {
-            twist: twist.clone().unwrap_or_else(|| NO_TWIST.into()),
-            scale: scale.clone().unwrap_or_else(|| NO_SCALE.into()),
+            twist: twist.as_ref().map_or_else(|| NO_TWIST.into(), |t| t.to_string()),
+            scale: scale.as_ref().map_or_else(|| NO_SCALE.into(), |k| k.to_string()),
             ..SweepOpts::default()
         };
         let mut pick = None;
@@ -52,7 +52,7 @@ impl SweepOpts {
             SweepOrientation::Parallel => o.orientation = 1,
             SweepOrientation::Direction(d) => {
                 o.orientation = DIRECTION;
-                let world = solidcraft_engine::doc::apply_vector(frame, *d);
+                let world = solidcraft_engine::doc::apply_vector(frame, d.0);
                 match world.normalized().and_then(world_axis) {
                     Some(name) => pick = Some(Sel::Axis { name: name.into() }),
                     None => o.direction = Some(world),

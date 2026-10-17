@@ -48,9 +48,10 @@ nightly run them all (`all_0` … `all_3`).
 
 Explicit `platforms.<os>.seeds` records override only the listed seeds on that
 operating system; all other seeds keep the shared records and strict tolerances.
-The four Windows records were independently reproduced on unmodified main
-`1e984c8e` and match the extrusion branch. Recording on a platform with such
-entries updates its changed seeds and preserves shared references.
+The first four Windows records were independently reproduced on unmodified main
+`1e984c8e`; seed 94 was independently reproduced on unmodified main `c5992386`
+after the extrusion rebase. Both match the extrusion branch. Recording on a platform
+with such entries updates its changed seeds and preserves shared references.
 
 To record an intended change, give the reason:
 

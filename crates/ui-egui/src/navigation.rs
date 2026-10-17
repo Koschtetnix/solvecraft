@@ -5,9 +5,10 @@
 //! One entry point, [`handle`], reads a frame's pointer, wheel, trackpad and modifier input over a
 //! view and moves `app.cam` the way Preferences › Navigation says: the navigation preset (Fusion,
 //! SolidWorks, Blender, Touchpad…), Orbit around, zoom to the cursor, the middle double-click and
-//! orbit snapping. The SpaceMouse, view keys and the navigators act on `app.cam` independently of
-//! the page. New canvases must call `navigation::handle` rather than reading drags or the wheel
-//! themselves; `hand_rolled_camera_input_is_rejected` fails when they do.
+//! orbit snapping. The 3D mouse's motion goes through [`device`] too, with the page's
+//! [`NavCaps`]. The view keys and the navigators act on `app.cam` independently of the page. New
+//! canvases must call `navigation::handle` rather than reading drags or the wheel themselves;
+//! `hand_rolled_camera_input_is_rejected` fails when they do.
 
 use egui::{Pos2, Rect, pos2, vec2};
 use serde_json::json;
@@ -16,6 +17,7 @@ use solidcraft_engine::render::Camera;
 
 use crate::SolveApp;
 use crate::prefs::{OrbitAround, pivot_under};
+use crate::space_mouse::Motion;
 use crate::viewport::{Hit, NavMode, axis_rect, nearest_quarter_turn, pick, pick_cached, projection};
 
 /// What a page's camera may do.
@@ -127,11 +129,12 @@ pub(crate) fn pinch_factor(input: &egui::InputState) -> f32 {
 
 /// Zoom anchor: the model point under the cursor, else the target's depth.
 /// Preferences › Navigation › Zoom to the cursor (off: toward the view's centre).
-pub(crate) fn zoom_anchor(app: &mut SolveApp, rect: egui::Rect, hover: Option<egui::Pos2>) -> Option<Vec3> {
+pub(crate) fn zoom_anchor(app: &mut SolveApp, rect: egui::Rect, hover: Option<egui::Pos2>, surface: bool) -> Option<Vec3> {
     hover.filter(|_| app.preferences.zoom_to_cursor).map(|p| {
         let proj = projection(app, rect);
         // Toward the model's surface under the cursor, else the target's depth.
-        if let Some(q) = pick_cached(app, &proj, p).iter().find_map(|h| if let Hit::Face { point, .. } = h { Some(*point) } else { None }) {
+        if surface && let Some(q) = pick_cached(app, &proj, p).iter().find_map(|h| if let Hit::Face { point, .. } = h { Some(*point) } else { None })
+        {
             return q;
         }
         let (o, d) = proj.ray(p);
@@ -162,8 +165,7 @@ pub(crate) fn modifier_motion(
         && app.viewport.boxsel.is_none()
         && !(picking && hover.is_some_and(|p| app.viewport.rect.is_some_and(|rect| crate::canvas::owns_pointer(app, &projection(app, rect), p))))
         && !hover.is_some_and(|p| app.viewport.layout.as_ref().is_some_and(|l| l.navigation.contains(p)));
-    let next =
-        hover.filter(|p| owns && p.is_finite()).and_then(|p| crate::prefs::nav_preset(&app.preferences.nav).motion_mode(mods).map(|mode| (mode, p)));
+    let next = crate::prefs::nav_preset(&app.preferences.nav).motion_mode(mods).zip(hover.filter(|p| owns && p.is_finite()));
     let previous = app.viewport.modifier_nav;
     if previous.map(|(m, _)| m) != next.map(|(m, _)| m) {
         app.viewport.orbit_pivot = None;
@@ -176,6 +178,45 @@ pub(crate) fn modifier_motion(
         let delta = if delta.is_finite() && delta.x.abs() <= 1e4 && delta.y.abs() <= 1e4 { delta } else { egui::Vec2::ZERO };
         (mode, delta)
     })
+}
+
+/// View keys (#1541): the arrows turn the view 15° (with Shift a quarter turn, as the navigation
+/// cube's arrows), Ctrl+arrows pan it a tenth of the view, and Ctrl+8 looks straight at the
+/// selected face, plane or sketch. Not while a menu, the command box or a focused widget has the
+/// arrows. Returns whether the key was used.
+pub(crate) fn view_key(app: &mut SolveApp, ctx: &egui::Context, key: egui::Key, mods: egui::Modifiers) -> bool {
+    use egui::Key;
+    let menu_open = egui::Popup::is_any_open(ctx)
+        || app.viewport.context_menu.is_some()
+        || app.ui.palette_open
+        || ctx.memory(|m| m.focused().is_some())
+        || ctx.data(|d| d.get_temp::<egui::Id>(egui::Id::new("sc_panel_open")).is_some());
+    let ctrl = mods.command || mods.ctrl;
+    if mods.alt || menu_open {
+        return false;
+    }
+    if key == Key::Num8 && ctrl && !mods.shift {
+        crate::viewport::look_at_selection(app);
+        return true;
+    }
+    let (action, dx, dy) = match key {
+        Key::ArrowLeft => ("left", -1.0, 0.0),
+        Key::ArrowRight => ("right", 1.0, 0.0),
+        Key::ArrowUp => ("up", 0.0, -1.0),
+        Key::ArrowDown => ("down", 0.0, 1.0),
+        _ => return false,
+    };
+    if ctrl {
+        // The model moves with the arrow, as it does under a pan drag.
+        if let Some(rect) = app.viewport.rect {
+            let step = rect.height() * 0.1;
+            camera_motion(app, rect, json!({"motion": "pan", "delta": [dx * step, dy * step]}));
+        }
+    } else {
+        let degrees = if mods.shift { 90.0 } else { 15.0 };
+        let _ = app.run("view.navigate", json!({"camera": app.cam, "action": action, "degrees": degrees}));
+    }
+    true
 }
 
 /// Continuous camera changes use the same JSON command as programmatic callers.
@@ -242,7 +283,9 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
     app.viewport.mouse = hover.filter(|_| inside);
     // Ctrl or Alt held: drawing and dragging don't snap.
     crate::drag_snap::set_suppressed(mods.ctrl || mods.alt || mods.command);
-    middle_double_click(app, ui, inside, caps.orbit);
+    middle_double_click(app, ui, inside);
+    // The 3D mouse's motion this frame, with what this page's camera may do.
+    device(app, rect, caps);
 
     // ---- navigation ----
     let trackpad_pan = app.preferences.trackpad_pans();
@@ -278,7 +321,7 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
         app.viewport.orbit_free = None;
         // Spread zooms in: the camera distance shrinks by the pinch factor.
         let f = f64::from(pinch).powf(-crate::prefs::zoom_sign(app));
-        let anchor = zoom_anchor(app, rect, hover);
+        let anchor = zoom_anchor(app, rect, hover, caps.orbit);
         if app.preferences.nav == crate::prefs::TOUCHPAD_NAV {
             let mut params = json!({"motion":"zoom", "factor":f.clamp(0.05,20.0)});
             if let Some(anchor) = anchor {
@@ -294,7 +337,7 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
         app.viewport.orbit_snap = None;
         app.viewport.orbit_free = None;
         let f = (-scroll as f64 * 0.0015 * crate::prefs::zoom_sign(app)).exp();
-        let anchor = zoom_anchor(app, rect, hover);
+        let anchor = zoom_anchor(app, rect, hover, caps.orbit);
         if app.preferences.nav == crate::prefs::TOUCHPAD_NAV {
             let mut params = json!({"motion":"zoom", "factor":f.clamp(0.05,20.0)});
             if let Some(anchor) = anchor {
@@ -463,6 +506,40 @@ pub(crate) fn handle(app: &mut SolveApp, ui: &mut egui::Ui, rect: Rect, resp: &e
     CameraInput { hover, scroll, mods, middle, secondary_down, primary_down, primary_pressed, delta, inside, axes, pinch, pan, primary_nav, mode }
 }
 
+/// The 3D mouse's motion this frame (#1336), on a page `rect` whose camera may do `caps`: the cap
+/// pans and zooms every page, and turns the view only where the page may orbit and no sketch is
+/// being edited (a sketch keeps its view square to it). [`handle`] calls it for its page; the 3D
+/// mouse only reads the device and queues the motion ([`crate::space_mouse::navigate_frame`]).
+pub(crate) fn device(app: &mut SolveApp, rect: Rect, caps: NavCaps) {
+    let Some(queued) = app.viewport.device_motion.take() else { return };
+    let turn = caps.orbit && app.session.active_sketch.is_none();
+    let height = f64::from(rect.height().max(1.0));
+    device_camera(&mut app.cam, queued.motion, queued.seconds, height, turn, app.preferences.zoom_reverse);
+}
+
+/// `seconds` of 3D mouse `motion` on `cam`, in a view `height` points tall. A full deflection
+/// pans about 0.6 of the view's height a second and turns about two radians a second, whatever
+/// the frame rate. With `turn` off the view keeps its orientation.
+pub(crate) fn device_camera(cam: &mut Camera, motion: Motion, seconds: f64, height: f64, turn: bool, reverse_zoom: bool) {
+    if !(seconds > 0.0) || !seconds.is_finite() {
+        return;
+    }
+    let [x, y, z] = motion.translation;
+    let [rx, ry, rz] = motion.rotation;
+    // Logical 3DxWare coordinates are X = left/right, Y = zoom and Z = up/down. The user's
+    // profile can swap the physical forward/back and up/down axes before they reach here.
+    cam.pan(x * height * 0.6 * seconds, z * height * 0.6 * seconds, height);
+    let zoom_sign = if reverse_zoom { -1.0 } else { 1.0 };
+    cam.zoom_at((-y * zoom_sign * 1.5 * seconds).exp(), None);
+    if turn {
+        // These are logical 3DxWare coordinates after the profile mapping: Rx is Tilt, Ry is
+        // Roll and Rz is Spin. The KMJ profile swaps physical Ry/Rz for the selected navigation
+        // mode, so swapping them again here would make Roll behave like Spin.
+        cam.orbit(ry * 250.0 * seconds, rx * 250.0 * seconds);
+        cam.roll_by(rz * 2.0 * seconds);
+    }
+}
+
 /// Six principal views, twelve edge diagonals and eight isometric corner directions.
 pub(crate) fn snap_directions() -> impl Iterator<Item = Vec3> {
     [-1.0, 0.0, 1.0].into_iter().flat_map(|x| {
@@ -569,7 +646,7 @@ pub(crate) fn step_orbit_snap(app: &mut SolveApp, rect: Rect, dt: f64) {
 /// A middle-button double-click goes Home (or fits, or nothing: Preferences › Navigation). Only
 /// clicks count: a press that moves (a pan or orbit drag) or is held is not one, and the two
 /// clicks must both be the middle button's, close together in time and place.
-pub(crate) fn middle_double_click(app: &mut SolveApp, ui: &egui::Ui, inside: bool, orbit: bool) {
+pub(crate) fn middle_double_click(app: &mut SolveApp, ui: &egui::Ui, inside: bool) {
     use egui::PointerButton::{Extra1, Extra2, Middle, Primary, Secondary};
     let (double, releases, middle, other, dragging) = ui.input(|i| {
         (
@@ -588,9 +665,7 @@ pub(crate) fn middle_double_click(app: &mut SolveApp, ui: &egui::Ui, inside: boo
         return;
     }
     match crate::prefs::MiddleDoubleClick::of(app) {
-        // Home turns the view; a flat page only frames its content.
-        crate::prefs::MiddleDoubleClick::Home if orbit => app.animate_view("home"),
-        crate::prefs::MiddleDoubleClick::Home => app.animate_fit_all(),
+        crate::prefs::MiddleDoubleClick::Home => app.animate_view("home"),
         crate::prefs::MiddleDoubleClick::Fit => app.animate_fit_all(),
         crate::prefs::MiddleDoubleClick::Off => {}
     }
@@ -638,15 +713,15 @@ pub(crate) fn orbit_about(app: &mut SolveApp, rect: egui::Rect, dx: f64, dy: f64
 mod tests {
     /// Every page with a camera navigates through [`super::handle`] (#1454). A page that reads
     /// the wheel or moves the view camera itself would drift from the user's navigation settings,
-    /// so outside this module (and the SpaceMouse driver, a device rather than a page) the camera
-    /// may only be moved through it, the view commands or the navigators.
+    /// so outside this module the camera may only be moved through it, the view commands or the
+    /// navigators. The 3D mouse in both apps hands its motion to [`super::device`].
     #[test]
     fn hand_rolled_camera_input_is_rejected() {
         const PATTERNS: [&str; 7] =
             ["smooth_scroll_delta", "raw_scroll_delta", "zoom_delta()", "cam.orbit(", "cam.pan(", "cam.zoom_at(", "cam.roll_by("];
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let dirs = [root.join("src"), root.join("../../apps/solidcraft/src")];
-        let allowed = ["navigation.rs", "space_mouse.rs"];
+        let dirs = [root.join("src"), root.join("../../apps/solidcraft/src"), root.join("../../apps/solidcraft-web/src")];
+        let allowed = ["navigation.rs"];
         let mut offenders = Vec::new();
         let mut scanned = 0;
         let mut stack: Vec<std::path::PathBuf> = dirs.iter().filter(|d| d.is_dir()).cloned().collect();
@@ -662,6 +737,7 @@ mod tests {
                     continue;
                 }
                 scanned += 1;
+                // A Windows checkout's CRLF lines, read as written, so the split below finds the tests.
                 let text = std::fs::read_to_string(&path).unwrap().replace("\r\n", "\n");
                 // In-file unit tests set cameras up directly; only the code above them counts.
                 let code = text.split("\n#[cfg(test)]\nmod ").next().unwrap_or_default();
@@ -739,5 +815,104 @@ mod tests {
             }
             assert_ne!(app.cam.distance, before.distance, "{preset}: the wheel zooms");
         }
+    }
+
+    /// The 3D mouse pans and zooms a flat page with the cap and never turns it, as the mouse
+    /// does there; pages that orbit turn with it (#1336).
+    #[test]
+    fn the_3d_mouse_pans_and_zooms_a_flat_page_but_never_turns_it() {
+        use crate::space_mouse::{DeviceMotion, Motion};
+        let every_axis = DeviceMotion { motion: Motion { translation: [1.0, 1.0, 1.0], rotation: [1.0, 1.0, 1.0] }, seconds: 0.05 };
+        let flat = super::NavCaps { orbit: false, pick: false };
+        for (caps, turns) in [(flat, false), (super::NavCaps::MODEL, true), (super::NavCaps::RENDER, true)] {
+            let mut s = solidcraft_engine::Session::default();
+            s.execute("solid.box", &serde_json::json!({"length":40,"width":30,"height":20})).unwrap();
+            let mut app = crate::SolveApp::new(s, crate::Services::default());
+            let ctx = egui::Context::default();
+            let before = app.cam;
+            app.viewport.device_motion = Some(every_axis);
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0))),
+                time: Some(0.0),
+                focused: true,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(raw, |ui| {
+                let rect = ui.max_rect();
+                app.viewport.rect = Some(rect);
+                let resp = ui.interact(rect, ui.id().with("page"), egui::Sense::click_and_drag());
+                super::handle(&mut app, ui, rect, &resp, caps);
+            });
+            out.textures_delta.clear();
+            assert!(app.viewport.device_motion.is_none(), "{caps:?}: the page takes the motion");
+            assert_ne!(app.cam.target, before.target, "{caps:?}: the cap pans");
+            assert!(app.cam.distance < before.distance, "{caps:?}: the cap zooms");
+            let turned = (app.cam.yaw, app.cam.pitch, app.cam.roll) != (before.yaw, before.pitch, before.roll);
+            assert_eq!(turned, turns, "{caps:?}: the cap turns the view only where the page orbits");
+        }
+    }
+
+    /// While a sketch is edited the cap pans and zooms, and the view stays square to the sketch.
+    #[test]
+    fn the_3d_mouse_never_turns_a_sketch_being_edited() {
+        use crate::space_mouse::{DeviceMotion, Motion};
+        let mut s = solidcraft_engine::Session::default();
+        s.execute("sketch.create", &serde_json::json!({"plane": "XY"})).unwrap();
+        let mut app = crate::SolveApp::new(s, crate::Services::default());
+        assert!(app.session.active_sketch.is_some());
+        let before = app.cam;
+        app.viewport.device_motion = Some(DeviceMotion { motion: Motion { translation: [1.0; 3], rotation: [1.0; 3] }, seconds: 0.05 });
+        let page = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
+        super::device(&mut app, page, super::NavCaps::MODEL);
+        assert_eq!((app.cam.yaw, app.cam.pitch, app.cam.roll), (before.yaw, before.pitch, before.roll));
+        assert_ne!(app.cam.target, before.target);
+        assert!(app.cam.distance < before.distance);
+        // Nothing queued, nothing moves.
+        let still = app.cam;
+        super::device(&mut app, page, super::NavCaps::MODEL);
+        assert_eq!(app.cam, still);
+    }
+}
+
+#[cfg(test)]
+mod view_key_tests {
+    use crate::scenario::Harness;
+    use serde_json::json;
+
+    fn turned(h: &mut Harness, key: serde_json::Value) -> (f64, f64) {
+        let before = h.app.cam;
+        h.step(&key).unwrap();
+        h.frames(2);
+        (h.app.cam.yaw - before.yaw, h.app.cam.pitch - before.pitch)
+    }
+
+    /// #1541: the arrows turn the view 15°, Shift+arrows a quarter turn, Ctrl+arrows pan, and none
+    /// of them is a shortcut a command can take.
+    #[test]
+    fn arrow_keys_turn_and_pan_the_view() {
+        let mut h = Harness::new();
+        h.app.preferences.look_at_anim = false;
+        h.app.run("solid.box", json!({"length": 10, "width": 10, "height": 10})).unwrap();
+        h.step(&json!({"call": "ui.view", "params": {"view": "front"}})).unwrap();
+        h.frames(3);
+        let close = |a: f64, b: f64| (a.abs() - b.to_radians()).abs() < 1e-6;
+        let (yaw, pitch) = turned(&mut h, json!({"key": "ArrowLeft"}));
+        assert!(close(yaw, 15.0) && close(pitch, 0.0), "Left turns 15°: {yaw} {pitch}");
+        let (yaw, pitch) = turned(&mut h, json!({"key": "ArrowUp"}));
+        assert!(close(yaw, 0.0) && close(pitch, 15.0), "Up turns 15° over: {yaw} {pitch}");
+        let (yaw, _) = turned(&mut h, json!({"key": "ArrowRight", "shift": true}));
+        assert!(close(yaw, 90.0), "Shift+Right is a quarter turn: {yaw}");
+        let (before, angles) = (h.app.cam.target, (h.app.cam.yaw, h.app.cam.pitch));
+        h.step(&json!({"key": "ArrowRight", "cmd": true})).unwrap();
+        h.frames(2);
+        assert_ne!(h.app.cam.target, before, "Ctrl+Right pans");
+        assert_eq!((h.app.cam.yaw, h.app.cam.pitch), angles, "and does not turn");
+        for k in [egui::Key::ArrowLeft, egui::Key::ArrowRight, egui::Key::ArrowUp, egui::Key::ArrowDown] {
+            for mods in [egui::Modifiers::NONE, egui::Modifiers::SHIFT, egui::Modifiers::COMMAND] {
+                let name = crate::keymap::key_name(k, mods);
+                assert!(crate::keymap::RESERVED.contains(&name.as_str()), "{name} must be reserved");
+            }
+        }
+        assert!(crate::keymap::RESERVED.contains(&crate::keymap::key_name(egui::Key::Num8, egui::Modifiers::COMMAND).as_str()));
     }
 }

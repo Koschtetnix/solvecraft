@@ -81,6 +81,10 @@ construction_plane
 split
   remap_refs: plane.base.base.name
   remap_bodies: body, tool.body
+split_line
+  sketches: [6]
+  remap_refs: plane.base.base.name, sketch
+  remap_bodies: body
 construction_axis
 construction_point_planes
 construction_point_along
@@ -172,6 +176,15 @@ surface_loft
 surface_blend
   remap_bodies: from.body
 surface_offset
+  remap_bodies: body
+surface_blend
+  remap_bodies: from.body
+surface_boundary
+  sketches: [1]
+  remap_refs: sketch
+surface_match
+  remap_bodies: body
+surface_fair
   remap_bodies: body
 unstitch
   remap_bodies: body

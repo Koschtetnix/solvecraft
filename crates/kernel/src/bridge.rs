@@ -191,44 +191,115 @@ pub fn frames(face: &mt::Face, edges: &[mt::Edge], leave: Vec3, count: usize) ->
     let leave =
         leave.normalized().filter(|l| l.is_finite()).ok_or_else(|| KernelError::Invalid("the leave direction must be a finite vector".into()))?;
     let (pts, length) = chain_samples(edges, count)?;
-    let surf = face.surface();
-    let (Some(range_u), Some(range_v)) = surf.try_range_tuple() else {
-        return Err(KernelError::Failed("bridge: the support surface is unbounded".into()));
+    let support = Support::of(face, length)?;
+    let mut walk = Walk::new(length);
+    let along = |n: Vec3| -> Result<Vec3> {
+        (leave - n * leave.dot(n))
+            .normalized()
+            .ok_or_else(|| KernelError::Invalid("the leave direction is normal to the support surface: it has no tangent plane there".to_string()))
     };
-    // A face's own edges may sit a fit tolerance off its surface (a cylinder's wall as a NURBS
-    // next to its exact ring), so the projection is only asked to be close, not exact.
-    let tol = (length * 1e-4).max(1e-6);
-    // Finite-difference step: a thousandth of the chain, so curvature over the chain is read
-    // locally but round-off stays far below the geometry.
-    let mut step = (length * 1e-3).clamp(1e-6, 0.5);
     let mut out = Vec::with_capacity(pts.len());
-    // The station before this one, as the hint for the projection: it keeps the search on the
-    // same side of a periodic or split surface.
-    let mut hint: Option<(f64, f64)> = None;
     for p in &pts {
-        let project = |hint: Option<(f64, f64)>| surf.search_nearest_parameter(p3(*p), hint, 100);
-        let close = |uv: (f64, f64)| from_p3(surf.subs(uv.0, uv.1)).dist(*p) <= tol;
+        out.push(support.station(*p, &along, &mut walk, true)?.0);
+    }
+    Ok(out)
+}
+
+/// The frames of `face` at stations on its own boundary, each leaving the face straight across
+/// that boundary: `stations` are points on the boundary with the boundary's direction there *as
+/// the face's own boundary runs* (its wires as [`mt::Face::boundaries`] gives them), and the leave
+/// direction is that direction × the face's outward normal — in the face's tangent plane, at
+/// right angles to the boundary, away from the face. `length` is the size of the boundary the
+/// stations are on (it sets how closely a station must lie on the surface and the step the shape
+/// is read with). Each frame comes with the face's unit normal there (as the face is oriented).
+/// With `shape` false only the leave direction and the normal are read (`bend` and
+/// `bend_change` are zero), which needs no room on the surface beside the station.
+pub fn frames_across(face: &mt::Face, stations: &[(Vec3, Vec3)], length: f64, shape: bool) -> Result<Vec<(Frame, Vec3)>> {
+    if stations.len() > 1 << 16 || !(length.is_finite() && length > 0.0) {
+        return Err(KernelError::Invalid("frames across a boundary need at most 65536 stations on a boundary of finite size".into()));
+    }
+    let support = Support::of(face, length)?;
+    let outward = if face.orientation() { 1.0 } else { -1.0 };
+    let mut walk = Walk::new(length);
+    let mut out = Vec::with_capacity(stations.len());
+    for (p, tangent) in stations {
+        if !p.is_finite() || !tangent.is_finite() {
+            return Err(KernelError::Invalid("a boundary station must be finite".into()));
+        }
+        let away = |n: Vec3| -> Result<Vec3> {
+            tangent.cross(n * outward).normalized().ok_or_else(|| KernelError::Invalid("the boundary runs along the face's normal".to_string()))
+        };
+        let (frame, normal) = support.station(*p, &away, &mut walk, shape)?;
+        out.push((frame, normal * outward));
+    }
+    Ok(out)
+}
+
+/// A support surface read at stations: the surface, its parameter box, and how close a station
+/// must lie to it.
+struct Support {
+    surf: mt::Surface,
+    range_u: (f64, f64),
+    range_v: (f64, f64),
+    tol: f64,
+}
+
+/// What reading one station hands on to the next: the station's parameters (the hint for the
+/// next projection, which keeps the search on the same side of a periodic or split surface) and
+/// the finite-difference step that worked.
+struct Walk {
+    hint: Option<(f64, f64)>,
+    step: f64,
+}
+
+impl Walk {
+    fn new(length: f64) -> Walk {
+        // Finite-difference step: a thousandth of the chain, so curvature over the chain is read
+        // locally but round-off stays far below the geometry.
+        Walk { hint: None, step: (length * 1e-3).clamp(1e-6, 0.5) }
+    }
+}
+
+impl Support {
+    fn of(face: &mt::Face, length: f64) -> Result<Support> {
+        let surf = face.surface();
+        let (Some(range_u), Some(range_v)) = surf.try_range_tuple() else {
+            return Err(KernelError::Failed("bridge: the support surface is unbounded".into()));
+        };
+        // A face's own edges may sit a fit tolerance off its surface (a cylinder's wall as a NURBS
+        // next to its exact ring), so the projection is only asked to be close, not exact.
+        let tol = (length * 1e-4).max(1e-6);
+        Ok(Support { surf, range_u, range_v, tol })
+    }
+
+    /// The frame at `p`, leaving in `leave(n)` (`n` the surface's unit normal there), and that
+    /// normal. Without `read_shape`, the frame's shape is left at zero.
+    fn station(&self, p: Vec3, leave: &dyn Fn(Vec3) -> Result<Vec3>, walk: &mut Walk, read_shape: bool) -> Result<(Frame, Vec3)> {
+        let (surf, range_u, range_v, tol) = (&self.surf, self.range_u, self.range_v, self.tol);
+        let project = |hint: Option<(f64, f64)>| surf.search_nearest_parameter(p3(p), hint, 100);
+        let close = |uv: (f64, f64)| from_p3(surf.subs(uv.0, uv.1)).dist(p) <= tol;
         // The station before this one is the hint where it lands close; a chain that wraps the
         // surface (or a periodic one) falls back to a free search.
-        let (u, v) = match project(hint).filter(|uv| close(*uv)).or_else(|| project(None).filter(|uv| close(*uv))) {
+        let (u, v) = match project(walk.hint).filter(|uv| close(*uv)).or_else(|| project(None).filter(|uv| close(*uv))) {
             Some(uv) => uv,
             None => return Err(KernelError::Invalid("a picked edge is not on the support surface".into())),
         };
-        hint = Some((u, v));
+        walk.hint = Some((u, v));
         let at = from_p3(surf.subs(u, v));
-        if at.dist(*p) > tol {
+        if at.dist(p) > tol {
             return Err(KernelError::Invalid("a picked edge is not on the support surface".into()));
         }
         let normal = surf.normal(u, v);
         let n = Vec3::new(normal.x, normal.y, normal.z)
             .normalized()
             .ok_or_else(|| KernelError::Failed("bridge: the support surface has no normal".into()))?;
-        let w = (leave - n * leave.dot(n))
-            .normalized()
-            .ok_or_else(|| KernelError::Invalid("the leave direction is normal to the support surface: it has no tangent plane there".to_string()))?;
+        let w = leave(n)?;
+        if !read_shape {
+            return Ok((Frame { p, leave: w, bend: Vec3::ZERO, bend_change: Vec3::ZERO }, n));
+        }
         // Parameter-space direction that leaves in `w` at unit 3D speed: S_u·du + S_v·dv = w.
-        let su = tangent(&surf, u, v, range_u, true);
-        let sv = tangent(&surf, u, v, range_v, false);
+        let su = tangent(surf, u, v, range_u, true);
+        let sv = tangent(surf, u, v, range_v, false);
         let (a, b, c) = (su.dot(su), su.dot(sv), sv.dot(sv));
         let det = a * c - b * b;
         let scale = a.max(c).max(1e-30);
@@ -260,7 +331,7 @@ pub fn frames(face: &mt::Face, edges: &[mt::Edge], leave: Vec3, count: usize) ->
                 None
             }
         };
-        let mut h = step;
+        let mut h = walk.step;
         let mut chosen = pick(h);
         for _ in 0..8 {
             if chosen.is_some() {
@@ -299,10 +370,9 @@ pub fn frames(face: &mt::Face, edges: &[mt::Edge], leave: Vec3, count: usize) ->
         // against the leave direction: the curvature vector is the same either way, the change of
         // curvature turns round with the direction of travel.
         let bend_change = if t.dot(w) < 0.0 { -bend_change } else { bend_change };
-        out.push(Frame { p: *p, leave: w, bend, bend_change });
-        step = h;
+        walk.step = h;
+        Ok((Frame { p, leave: w, bend, bend_change }, n))
     }
-    Ok(out)
 }
 
 /// A first derivative of the surface in one parameter, by central differences (one-sided where

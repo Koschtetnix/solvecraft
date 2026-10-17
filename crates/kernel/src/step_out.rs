@@ -1252,7 +1252,8 @@ fn merge_split_faces(ex: &mut p21::Exchange, paint: &mut HashMap<u64, FaceLook>,
 
 /// B-spline cylinder and cone sheets written as CYLINDRICAL_SURFACE and CONICAL_SURFACE (the
 /// sheet covers only its own piece, and a fillet's may reach far past it), with the direction of
-/// the parameter seam: on the face's seam edge for a full turn, else opposite the face's middle.
+/// the parameter seam: on the face's seam edge for a full turn, else in the middle of the gap the
+/// face leaves (`gap_middle`), else opposite the face's middle.
 /// Sheets under faces merged from pieces always; a lone piece when its edges are circles square
 /// to the axis and rulings. (Faces replaced by merges stay in the exchange unreferenced: only the
 /// shells' faces count.)
@@ -1292,12 +1293,13 @@ fn analytic_sheets(ex: &p21::Exchange, merged_surfaces: &std::collections::HashS
             let p = ex.get(edge)?.params();
             [p.get(1), p.get(2)].into_iter().filter_map(|v| vertex_point(ex, v?.as_ref_id()?)).find_map(|q| unit(radial(q)))
         });
-        let x = match seam_dir {
+        let x = match seam_dir.or_else(|| gap_middle(ex, &loops, z, &radial)) {
             Some(x) => Some(x),
             None => {
-                // Points along the edges, not just their ends: the corners of a half turn (a
-                // slot's round end) point both ways and cancel out (#1198). The sheet's own
-                // middle where even those do.
+                // No single gap to find (a half turn has two corners, a tube cut in pieces
+                // several). Points along the edges, not just their ends: the corners of a half
+                // turn (a slot's round end) point both ways and cancel out (#1198). The sheet's
+                // own middle where even those do.
                 let mean = loops
                     .iter()
                     .flatten()
@@ -1314,6 +1316,51 @@ fn analytic_sheets(ex: &p21::Exchange, merged_surfaces: &std::collections::HashS
         }
     }
     out
+}
+
+/// The middle of the one angular gap that a face on a cylinder or cone leaves around its axis
+/// `z`. The face's boundary vertices are sorted by angle; each two neighbours are joined by one
+/// of its edges except across the gap (a 270° face split at 0°, 90°, 180° and 270° leaves
+/// 270°–360°). None unless there are three angles or more and exactly one gap: two vertices can
+/// be joined either way round.
+fn gap_middle(ex: &p21::Exchange, loops: &[Vec<(u64, bool)>], z: V3, radial: &impl Fn(V3) -> V3) -> Option<V3> {
+    use std::f64::consts::TAU;
+    let mut edges: Vec<(V3, V3)> = Vec::new();
+    for (e, _) in loops.iter().flatten() {
+        let p = ex.get(*e)?.params();
+        let (a, b) = (vertex_point(ex, p.get(1)?.as_ref_id()?)?, vertex_point(ex, p.get(2)?.as_ref_id()?)?);
+        edges.push((unit(radial(a))?, unit(radial(b))?));
+    }
+    let e1 = edges.first()?.0;
+    let e2 = unit(cross(z, e1))?;
+    let angle = |d: V3| dot(d, e2).atan2(dot(d, e1)).rem_euclid(TAU);
+    let close = |a: f64, b: f64| {
+        let d = (a - b).rem_euclid(TAU);
+        d < 1e-6 || TAU - d < 1e-6
+    };
+    let mut angles: Vec<f64> = Vec::new();
+    for (a, b) in &edges {
+        for t in [angle(*a), angle(*b)] {
+            if !angles.iter().any(|s| close(*s, t)) {
+                angles.push(t);
+            }
+        }
+    }
+    if angles.len() < 3 {
+        return None;
+    }
+    angles.sort_by(f64::total_cmp);
+    let joined = |s: f64, t: f64| {
+        edges.iter().any(|(a, b)| {
+            let (x, y) = (angle(*a), angle(*b));
+            (close(x, s) && close(y, t)) || (close(x, t) && close(y, s))
+        })
+    };
+    let n = angles.len();
+    let gaps: Vec<(f64, f64)> = (0..n).filter_map(|i| Some((*angles.get(i)?, *angles.get((i + 1) % n)?))).filter(|(s, t)| !joined(*s, *t)).collect();
+    let [(s, t)] = gaps[..] else { return None };
+    let m = s + (t - s).rem_euclid(TAU) / 2.0;
+    unit(add(mul(e1, m.cos()), mul(e2, m.sin())))
 }
 
 /// Margin left round a face when its sheet is cut down to it, as a share of the face's own

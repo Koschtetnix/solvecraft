@@ -120,6 +120,15 @@ impl PreviewState {
         }
     }
 
+    /// Drop the preview of a design that leaves the window. Its scene goes too: the viewport
+    /// keeps drawing the last scene it took until the slot it reads hands it another, so a fresh
+    /// state (another slot, empty) would leave the old preview drawn over the next design.
+    pub fn reset(&mut self) {
+        let (slot, key) = (std::mem::take(&mut self.slot), self.key);
+        *self = PreviewState { slot, key, ..PreviewState::default() };
+        self.set_scene(GpuScene::default());
+    }
+
     fn set_scene(&mut self, sc: GpuScene) {
         if let Ok(mut slot) = self.slot.lock() {
             *slot = Some(sc);
@@ -189,7 +198,20 @@ impl PreviewState {
 /// limits, feature dialog or document cannot reuse an obsolete pose.
 fn motion_key(cmds: &[(String, Value)], revision: u64, colors: Colors) -> Option<u64> {
     if !cmds.iter().any(|(c, p)| c == "joint.drive" || c == "joint.create" && p.get("values").is_some())
-        || !cmds.iter().all(|(c, _)| matches!(c.as_str(), "joint.drive" | "joint.create" | "joint.as_built" | "joint.edit" | "joint.limits"))
+        || !cmds.iter().all(|(c, _)| {
+            matches!(
+                c.as_str(),
+                "joint.drive"
+                    | "joint.create"
+                    | "joint.as_built"
+                    | "joint.edit"
+                    | "joint.limits"
+                    | "joint.gear"
+                    | "joint.rack_pinion"
+                    | "joint.screw"
+                    | "joint.cam"
+            )
+        })
     {
         return None;
     }
@@ -881,6 +903,24 @@ mod tests {
                 motion_key(&[(command.into(), json!({"joint": 1, "values": [90]}))], 7, colors()),
             );
         }
+        // A gear dialog playing its driving joint streams its poses too.
+        let gear = |angle: &str| {
+            vec![
+                ("joint.gear".to_string(), json!({"a": 1, "b": 2, "ra": 10, "rb": 20})),
+                ("joint.drive".to_string(), json!({"joint": 1, "values": [angle]})),
+            ]
+        };
+        assert!(motion_key(&gear("0 deg"), 7, colors()).is_some());
+        assert_eq!(motion_key(&gear("0 deg"), 7, colors()), motion_key(&gear("90 deg"), 7, colors()));
+        // So does a cam dialog turning its cam.
+        let cam = |angle: &str| {
+            vec![
+                ("joint.cam".to_string(), json!({"a": 1, "b": 2, "profile": {"sketch": 3}})),
+                ("joint.drive".to_string(), json!({"joint": 1, "values": [angle]})),
+            ]
+        };
+        assert!(motion_key(&cam("0 deg"), 7, colors()).is_some());
+        assert_eq!(motion_key(&cam("0 deg"), 7, colors()), motion_key(&cam("90 deg"), 7, colors()));
     }
 
     /// Combine previews its result (cut, join or intersect between existing bodies) without an
@@ -1085,6 +1125,28 @@ mod tests {
         tx.send(Err("too far".into())).unwrap();
         pv.poll(4, None);
         assert!(pv.error.is_none() && pv.shown_key == Some(1), "an old error is dropped");
+    }
+
+    /// A design leaving the window (another tab) takes its preview off the viewport: an empty
+    /// scene in the slot the viewport reads, under a new key. A fresh slot left the fillet
+    /// preview of the old design drawn over the new tab's empty design.
+    #[test]
+    fn reset_hands_the_viewport_an_empty_scene() {
+        let mut pv = PreviewState::default();
+        let mut sc = GpuScene::default();
+        sc.xray_tri([0.0; 3], [0.0, 0.0, 1.0], [255; 4]);
+        pv.set_scene(sc);
+        pv.active = true;
+        pv.replaced = vec!["Body1".into()];
+        let slot = pv.slot.clone();
+        let key = pv.key;
+        // The viewport took the scene.
+        assert!(slot.lock().unwrap().take().is_some_and(|s| !s.xray.is_empty()));
+        pv.reset();
+        assert!(std::sync::Arc::ptr_eq(&slot, &pv.slot), "the slot the viewport reads");
+        assert_ne!(pv.key, key, "a new key: the viewport takes the slot again");
+        assert!(slot.lock().unwrap().as_ref().is_some_and(|s| s.xray.is_empty() && s.blocks.is_empty()));
+        assert!(!pv.active && pv.replaced.is_empty());
     }
 }
 

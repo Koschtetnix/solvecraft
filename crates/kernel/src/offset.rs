@@ -459,6 +459,7 @@ fn split_corner(
     // normal, so its inside is to the left; the edge is convex when the face beyond it falls
     // away from there.
     let mut sign = 0.0f64;
+    let mut mixed = false;
     let mut pairs: Vec<(usize, usize)> = Vec::new();
     for &(fi, na, ..) in &planes {
         for w in faces.get(fi)?.boundaries() {
@@ -474,7 +475,7 @@ fn split_corner(
                     continue;
                 }
                 if sign * s < 0.0 {
-                    return None;
+                    mixed = true;
                 }
                 sign = s.signum();
             }
@@ -483,33 +484,55 @@ fn split_corner(
     if sign == 0.0 {
         return None;
     }
+    // Which triples of faces may meet at a new corner. All convex or all concave: any triple
+    // whose point is inside all the other moved planes. Mixed (a saddle, such as a box on a
+    // box that overhangs its side): the faces round the corner in order, and each new corner
+    // on three faces in a row (the two new edges on the middle face meet there). A saddle's
+    // faces bound no convex region, so a right corner can be outside another face's moved
+    // plane, and the inside-all-the-others test does not apply. What keeps a corner in place
+    // is that it is where its middle face's two new edges meet; a corner past the far end of
+    // one of the corner's edges turns that edge round, and a face whose loops cross after the
+    // move is refused (both checked in `offset_body`).
+    let triples: Vec<[usize; 3]> = if mixed {
+        let ring = face_ring(&pairs, planes.len())?;
+        let n = ring.len();
+        (0..n).map(|i| [ring[(i + n - 1) % n], ring[i], ring[(i + 1) % n]]).collect()
+    } else {
+        let mut t = Vec::new();
+        for ia in 0..planes.len() {
+            for ib in ia + 1..planes.len() {
+                for ic in ib + 1..planes.len() {
+                    t.push([planes[ia].0, planes[ib].0, planes[ic].0]);
+                }
+            }
+        }
+        t
+    };
+    let plane_of = |fi: usize| planes.iter().find(|x| x.0 == fi);
     // Convex: the body's side, n·x ≤ d; concave: the outside's, n·x ≥ d.
     let side = -sign;
     let merge = size * 1e-6;
     let mut nodes: Vec<(Vec3, Vec<usize>)> = Vec::new();
-    for (ia, a) in planes.iter().enumerate() {
-        for (ib, b) in planes.iter().enumerate().skip(ia + 1) {
-            for c in planes.iter().skip(ib + 1) {
-                let den = a.1.dot(b.1.cross(c.1));
-                if den.abs() < 1e-9 {
-                    continue;
-                }
-                let x = (b.1.cross(c.1) * a.3 + c.1.cross(a.1) * b.3 + a.1.cross(b.1) * c.3) * (1.0 / den);
-                if !x.is_finite() || x.dist(p) > size || planes.iter().any(|q| side * (q.1.dot(x) - q.3) > merge) {
-                    continue;
-                }
-                let fs = [a.0, b.0, c.0];
-                match nodes.iter_mut().find(|(q, _)| q.dist(x) < merge) {
-                    Some((_, nf)) => {
-                        for f in fs {
-                            if !nf.contains(&f) {
-                                nf.push(f);
-                            }
-                        }
+    for [fa, fb, fc] in triples {
+        let (a, b, c) = (plane_of(fa)?, plane_of(fb)?, plane_of(fc)?);
+        let den = a.1.dot(b.1.cross(c.1));
+        if den.abs() < 1e-9 {
+            continue;
+        }
+        let x = (b.1.cross(c.1) * a.3 + c.1.cross(a.1) * b.3 + a.1.cross(b.1) * c.3) * (1.0 / den);
+        if !x.is_finite() || x.dist(p) > size || (!mixed && planes.iter().any(|q| side * (q.1.dot(x) - q.3) > merge)) {
+            continue;
+        }
+        let fs = [fa, fb, fc];
+        match nodes.iter_mut().find(|(q, _)| q.dist(x) < merge) {
+            Some((_, nf)) => {
+                for f in fs {
+                    if !nf.contains(&f) {
+                        nf.push(f);
                     }
-                    None => nodes.push((x, fs.to_vec())),
                 }
             }
+            None => nodes.push((x, fs.to_vec())),
         }
     }
     // Every face keeps a corner here, and every edge an end.
@@ -525,6 +548,39 @@ fn split_corner(
         *q = p + span_step(&ns, &ss)?;
     }
     Some(nodes)
+}
+
+/// The faces round a corner in order, from the pairs of faces on each of its edges: `None`
+/// unless they form one simple ring of `count` faces (each face meets the corner once, between
+/// exactly two neighbours).
+fn face_ring(pairs: &[(usize, usize)], count: usize) -> Option<Vec<usize>> {
+    let mut next: HashMap<usize, Vec<usize>> = HashMap::new();
+    for &(a, b) in pairs {
+        for (x, y) in [(a, b), (b, a)] {
+            let ns = next.entry(x).or_default();
+            if !ns.contains(&y) {
+                ns.push(y);
+            }
+        }
+    }
+    if next.len() != count || next.values().any(|ns| ns.len() != 2) {
+        return None;
+    }
+    let first = *next.keys().min()?;
+    let mut ring = vec![first];
+    let mut prev = first;
+    let mut cur = *next.get(&first)?.first()?;
+    while cur != first {
+        if ring.len() >= count {
+            return None;
+        }
+        ring.push(cur);
+        let ns = next.get(&cur)?;
+        let to = if ns[0] == prev { ns[1] } else { ns[0] };
+        prev = cur;
+        cur = to;
+    }
+    (ring.len() == count).then_some(ring)
 }
 
 /// The corners of a split corner (see [`split_corner`]) on face `face`, in order from corner

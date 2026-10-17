@@ -29,7 +29,7 @@ pub static COMMANDS: &[CommandSpec] = &[
     CommandSpec::new("sketch.create", "Create Sketch", create_sketch)
         .at("SOLID", "CREATE")
         .icon("sketch")
-        .params("plane: XY|XZ|YZ | construction plane name or id | {origin, x_dir, y_dir} | {face: [world x,y,z], body?: exact world body, index?: face index, path?: complete occurrence ids, fixed?: bool}; new face attachments require a unique certified source (a flat face of a sheet metal body attaches to its panel instead, in the flat pattern's coordinates), fixed:true explicitly freezes the selected plane; offset?: expr, project_edges?: bool, name?"),
+        .params("plane: XY|XZ|YZ | construction plane name or id | {origin, x_dir, y_dir} | {face: [world x,y,z], body?: exact world body, index?: face index, path?: complete occurrence ids, fixed?: bool}; new face attachments require a unique certified source (a flat face of a sheet metal body attaches to its panel instead, in the flat pattern's coordinates), fixed:true explicitly freezes the selected plane; offset?: expr, flip?: bool | \"x\" | \"y\" (not on a face: sketch the plane from its other side, so the normal and the default extrude direction are reversed; a half turn about the plane's own x or y axis, true picks the one keeping the sketch's y axis upward; offset still moves along the unflipped normal), project_edges?: bool, name?"),
     CommandSpec::new("sketch.edit", "Edit Sketch", edit_sketch).noundo().icon("sketch").params("sketch: id or name"),
     CommandSpec::new("sketch.finish", "Finish Sketch", finish_sketch).at("SKETCH", "FINISH SKETCH").icon("finish").enabled(in_sketch).noundo(),
     CommandSpec::new("sketch.line", "Line", draw_line)
@@ -543,7 +543,7 @@ pub(crate) fn author_path_for_rebind(s: &Session, feature: &solidcraft_doc::Feat
         let mut plane = plane;
         loop {
             match plane {
-                PlaneRef::Offset { base, .. } | PlaneRef::AtAngle { base, .. } => plane = base,
+                PlaneRef::Offset { base, .. } | PlaneRef::AtAngle { base, .. } | PlaneRef::Flipped { base, .. } => plane = base,
                 PlaneRef::Face { anchor: Some(anchor), .. } => {
                     saved = Some(anchor.author_path.clone());
                     break;
@@ -635,7 +635,31 @@ fn create_sketch(s: &mut Session, p: &Value) -> Result<Value> {
             return Err(bad(cmd, format!("`{key}` belongs inside `plane`: {example}")));
         }
     }
-    create_sketch_with_plane(s, p, plane_ref(s, p, cmd)?, None)
+    let mut plane = plane_ref(s, p, cmd)?;
+    if let Some(about_y) = flip_param(s, p, &plane, cmd)? {
+        plane = PlaneRef::Flipped { base: Box::new(plane), about_y };
+    }
+    create_sketch_with_plane(s, p, plane, None)
+}
+
+/// `flip` of `sketch.create`: `None` keeps the plane's own side, otherwise the axis to turn
+/// about (`true`: about y when the plane's y axis points upward, so it stays up, else about x).
+fn flip_param(s: &Session, p: &Value, plane: &PlaneRef, cmd: &str) -> Result<Option<bool>> {
+    let about_y = match p.get("flip") {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => return Ok(None),
+        Some(Value::String(a)) if a.eq_ignore_ascii_case("x") => false,
+        Some(Value::String(a)) if a.eq_ignore_ascii_case("y") => true,
+        Some(Value::Bool(true)) => {
+            let (vals, _) = s.doc.param_values();
+            let resolved = s.doc.resolve_plane_in(&vals, plane, 0, Some(&s.model.state()))?;
+            resolved.y.z > 1e-9
+        }
+        Some(_) => return Err(bad(cmd, "`flip` must be true, false, \"x\" or \"y\"")),
+    };
+    if face::is_face(p) {
+        return Err(bad(cmd, "`flip` is for origin, construction and explicit planes; a face already faces outward"));
+    }
+    Ok(Some(about_y))
 }
 
 /// Used only by face Extrude/Revolve/PressPull, preserving pre-certificate linked profiles.
@@ -1439,10 +1463,10 @@ pub(super) fn apply_in_order(sk: &mut Sketch, rep: &SolveReport, first: &[Ent], 
     if !second_locked {
         ordered(first, second);
     }
-    if !first_locked {
-        for f in first {
-            ordered(&[second], *f);
-        }
+    // Each first entity that can move may (a free symmetry line between two fixed lines, #1796),
+    // even when another of them can't.
+    for f in first.iter().filter(|f| !ent_locked(sk, rep, **f)) {
+        ordered(&[second], *f);
     }
     const TEMP: &str = "__keep_size";
     for (h, extra) in tries {
@@ -2244,11 +2268,14 @@ fn construction(s: &mut Session, p: &Value) -> Result<Value> {
         let mut n = 0;
         for c in cs {
             if let Some(cu) = sk.curves.get_mut(c)
-                && (cu.construction != to || to && cu.centerline)
+                && (cu.construction != to || to && cu.centerline || !to && cu.infinite)
             {
                 cu.construction = to;
                 if to {
                     cu.centerline = false;
+                } else {
+                    // A normal line is a finite one.
+                    cu.infinite = false;
                 }
                 n += 1;
             }
@@ -2491,6 +2518,10 @@ fn solve_cmd(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 #[cfg(test)]
+#[path = "sketch_flip_tests.rs"]
+mod flip_tests;
+
+#[cfg(test)]
 #[path = "sketch_rect_tests.rs"]
 mod rect_tests;
 
@@ -2511,6 +2542,9 @@ mod drag_live_tests;
 #[cfg(test)]
 #[path = "sketch_ids_tests.rs"]
 mod ids_tests;
+#[cfg(test)]
+#[path = "sketch_infinite_tests.rs"]
+mod infinite_tests;
 #[cfg(test)]
 #[path = "sketch_redundant_tests.rs"]
 mod redundant_tests;

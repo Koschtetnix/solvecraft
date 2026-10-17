@@ -39,9 +39,9 @@ fn a_new_sweep_takes_its_options_from_the_dialog() {
     assert!(h.app.dialog.is_none(), "{:?}", h.app.session.log);
     let f = h.app.session.doc.features.last().unwrap();
     let FeatureKind::Sweep { orientation, twist, scale, .. } = &f.kind else { panic!("{:?}", f.kind) };
-    assert_eq!(*orientation, SweepOrientation::Direction(Vec3::X));
-    assert_eq!(twist.as_deref(), Some("90 deg"));
-    assert_eq!(scale.as_deref(), Some("0.5"));
+    assert_eq!(*orientation, SweepOrientation::Direction(solidcraft_engine::doc::Dir(Vec3::X)));
+    assert_eq!(twist.as_ref().map(|t| t.as_str()), Some("90 deg"));
+    assert_eq!(scale.as_ref().map(|k| k.as_str()), Some("0.5"));
 }
 
 #[test]

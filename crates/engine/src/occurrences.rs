@@ -240,7 +240,7 @@ impl Session {
         let mut plane = plane;
         loop {
             match plane {
-                PlaneRef::Offset { base, .. } | PlaneRef::AtAngle { base, .. } => plane = base,
+                PlaneRef::Offset { base, .. } | PlaneRef::AtAngle { base, .. } | PlaneRef::Flipped { base, .. } => plane = base,
                 // A face attachment that names no exact source: which body it sits on is unknown,
                 // so none is taken from the view.
                 PlaneRef::Face { anchor: None, .. } => return none,
@@ -258,7 +258,7 @@ impl Session {
         let mut removed = std::collections::BTreeSet::new();
         for feature in self.doc.features.iter().skip(marker).filter(|f| !f.suppressed) {
             if let FeatureKind::Remove { bodies } = &feature.kind {
-                removed.extend(bodies.iter().filter(|b| !kept.contains(b.as_str()) && shown.body(b).is_some()).cloned());
+                removed.extend(bodies.iter().filter(|b| !kept.contains(b.0.as_str()) && shown.body(&b.0).is_some()).map(|b| b.0.clone()));
             }
         }
         if removed.is_empty() || self.doc.occurrences.is_empty() {

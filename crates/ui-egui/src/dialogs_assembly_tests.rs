@@ -330,7 +330,6 @@ fn drive_value_takes_the_keyboard() {
 fn drive_slider_previews_intermediate_positions_before_release() {
     let mut h = crate::scenario::Harness::new();
     h.app = two_boxes();
-    h.app.viewport.no_pixels = true;
     let (a, b) = (occ(&h.app, "A"), occ(&h.app, "B"));
     h.app
         .run(
@@ -364,7 +363,9 @@ fn drive_slider_previews_intermediate_positions_before_release() {
     let second = preview_commands(&h.app, h.app.dialog.as_ref().unwrap()).unwrap();
     assert_ne!(first, second, "the held slider requests a new pose before release");
     assert!(h.ctx.input(|i| i.pointer.primary_down()));
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    // The preview runs on a worker thread; on a machine busy with other test binaries it can
+    // take several seconds, so wait as long as the other preview tests do (#1549).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
     while h.app.preview.busy {
         assert!(std::time::Instant::now() < deadline, "held-slider preview did not finish");
         std::thread::sleep(std::time::Duration::from_millis(1));
@@ -549,4 +550,54 @@ fn drive_preset_refuses_a_rigid_joint() {
     let mut k = Asm::Drive { joint: 0, values: Vec::new(), focus: true };
     let e = preset(&app.session, &mut k, &json!({"joint": "Glue"})).unwrap_err();
     assert!(e.contains("rigid"), "{e}");
+}
+
+/// Motion Trace on the four-bar: a pick on the coupler and the first joint (the crank) driven a
+/// turn give the trace's parameters, and OK keeps the path as a 3D sketch spline. A pick on the
+/// coupler where an exploded view shows it traces from where the coupler is placed.
+#[test]
+fn motion_trace_keeps_the_picked_point_path() {
+    let mut app = four_bar();
+    let coupler = occ(&app, "Coupler");
+    let top = |app: &SolveApp| {
+        let b = occurrence_bounds(&app.session, &[coupler]);
+        Vec3::new((b.min.x + b.max.x) / 2.0, (b.min.y + b.max.y) / 2.0, b.max.z)
+    };
+    let placed = top(&app);
+    app.start("motion.trace");
+    let mut d = app.dialog.clone().unwrap();
+    assert!(apply_commands(&app, &d).is_err(), "no point yet");
+    d.pick(&app.session, face_sel(&app.session, placed).unwrap());
+    let c = apply_commands(&app, &d).unwrap();
+    let (id, p) = &c[0];
+    assert_eq!(id, "motion.trace.keep");
+    let crank = app.session.doc.assembly.joints.iter().find(|j| j.name == "Crank").unwrap().id;
+    assert_eq!((&p["occurrence"], &p["joint"], &p["from"], &p["to"]), (&json!([coupler]), &json!(crank), &json!("0 deg"), &json!("360 deg")), "{p}");
+    let at = |p: &Value| Vec3::new(p["point"][0].as_f64().unwrap(), p["point"][1].as_f64().unwrap(), p["point"][2].as_f64().unwrap());
+    assert!(at(p).dist(placed) < 1e-6, "{p}");
+    let preview = app.session.scratch().execute("motion.trace", p).unwrap();
+    assert!(preview["samples"] == 100 && preview["stopped_at"].is_null(), "{preview}");
+    crate::dialogs::run_dialog(&mut app, &d).unwrap();
+    let sketch = app.session.doc.find_feature("Motion Trace1").unwrap().id;
+    let wire = app.session.doc.sketch(sketch).unwrap().wires[0].clone();
+    assert_eq!(wire.fit.len(), 100);
+    assert_eq!(wire.fit.first(), wire.fit.last(), "a full turn closes the spline");
+    // Exploded: the coupler shows away from its placement; the pick maps back to it.
+    app.run("explode.create", json!({"name": "Apart", "scale": 1})).unwrap();
+    app.run("explode.show", json!({"view": "Apart"})).unwrap();
+    let shown = top(&app);
+    assert!(shown.dist(placed) > 1.0, "the exploded view moves the coupler");
+    app.start("motion.trace");
+    let mut d = app.dialog.clone().unwrap();
+    d.pick(&app.session, face_sel(&app.session, shown).unwrap());
+    let p = apply_commands(&app, &d).unwrap()[0].1.clone();
+    assert!(at(&p).dist(placed) < 1e-6, "{p}");
+    // The preview is drawn moved with the coupler: it starts at the point picked where it shows.
+    let start = app.session.scratch().execute("motion.trace", &p).unwrap()["points"][0].clone();
+    let (_, _, seen, put) = trace::placement(&app.session, &d.inputs).unwrap();
+    let drawn = {
+        use solidcraft_engine::doc::{apply_point, mat_inverse};
+        apply_point(&seen, apply_point(&mat_inverse(&put).unwrap(), at(&json!({"point": start}))))
+    };
+    assert!(drawn.dist(shown) < 1e-6, "{drawn:?} wants {shown:?}");
 }

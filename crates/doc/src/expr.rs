@@ -15,6 +15,94 @@ const MAX_LEN: usize = 4096;
 const MAX_DEPTH: usize = 64;
 const MAX_ARGS: usize = 64;
 
+/// An expression a feature holds, as the user wrote it (`2 * width + 5 mm`): kept as text and
+/// evaluated with the design's parameters. It is saved as a plain string, and reads as one
+/// (`&expr` is a `&str`); it changes only as a whole (`*expr = new.into()`).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct Expr(String);
+
+impl Expr {
+    pub fn new(s: impl Into<String>) -> Self {
+        Expr(s.into())
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl std::ops::Deref for Expr {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl AsRef<str> for Expr {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for Expr {
+    fn from(s: String) -> Self {
+        Expr(s)
+    }
+}
+
+impl From<&str> for Expr {
+    fn from(s: &str) -> Self {
+        Expr(s.to_string())
+    }
+}
+
+impl From<&String> for Expr {
+    fn from(s: &String) -> Self {
+        Expr(s.clone())
+    }
+}
+
+impl From<Expr> for String {
+    fn from(e: Expr) -> Self {
+        e.0
+    }
+}
+
+impl std::fmt::Display for Expr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl PartialEq<str> for Expr {
+    fn eq(&self, other: &str) -> bool {
+        self.0 == other
+    }
+}
+
+impl PartialEq<&str> for Expr {
+    fn eq(&self, other: &&str) -> bool {
+        self.0 == *other
+    }
+}
+
+impl PartialEq<Expr> for String {
+    fn eq(&self, other: &Expr) -> bool {
+        *self == other.0
+    }
+}
+
+impl PartialEq<String> for Expr {
+    fn eq(&self, other: &String) -> bool {
+        &self.0 == other
+    }
+}
+
 /// What an expression must evaluate to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -280,6 +368,13 @@ fn lex_spans(s: &str) -> Result<Vec<(Tok, usize, usize)>, DocError> {
             out.push((Tok::Id(s.get(at(st)..at(i)).unwrap_or_default().to_string()), at(st), at(i)));
         } else if c == '°' {
             out.push((Tok::Id("deg".into()), at(i), at(i + 1)));
+            i += 1;
+        } else if c == '"' || c == '″' {
+            // Inch and foot marks (`1"`, `2'`, #1502), straight or as primes.
+            out.push((Tok::Id("in".into()), at(i), at(i + 1)));
+            i += 1;
+        } else if c == '\'' || c == '′' {
+            out.push((Tok::Id("ft".into()), at(i), at(i + 1)));
             i += 1;
         } else if c == '×' || c == '·' {
             out.push((Tok::Op('*'), at(i), at(i + 1)));
@@ -854,6 +949,20 @@ mod tests {
         for bad in ["2,", ",5", "2 ,5", "2, 5", "1,5,3", "1.5,3"] {
             assert!(ev(bad, Kind::Unitless).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn inch_and_foot_marks() {
+        // #1502: `1"` in a millimetre design is an inch, `2'` two feet, straight or as primes.
+        assert_eq!(ev("1\"", Kind::Length).unwrap(), 25.4);
+        assert_eq!(ev("1″", Kind::Length).unwrap(), 25.4);
+        assert_eq!(ev("2'", Kind::Length).unwrap(), 609.6);
+        assert_eq!(ev("2′", Kind::Length).unwrap(), 609.6);
+        assert_eq!(ev("1/2\"", Kind::Length).unwrap(), 12.7);
+        assert_eq!(ev("width + 1\"", Kind::Length).unwrap(), 65.4);
+        assert_eq!(ev("2' + 3\"", Kind::Length).unwrap(), 685.8);
+        // A mark alone is its unit alone, as `in` is.
+        assert_eq!(ev("\"", Kind::Length).ok(), ev("in", Kind::Length).ok());
     }
 
     #[test]

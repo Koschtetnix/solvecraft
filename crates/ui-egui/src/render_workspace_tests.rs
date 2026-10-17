@@ -496,7 +496,6 @@ fn nav_app(render: bool, preset: &str, around: crate::prefs::OrbitAround) -> cra
     let mut s = Session::default();
     s.execute("solid.box", &json!({"length":40,"width":30,"height":20,"body_name":"Product"})).unwrap();
     let mut app = crate::SolveApp::new(s, crate::Services::default());
-    app.viewport.no_pixels = true;
     if render {
         enter(&mut app, true).unwrap();
         assert!(active(&app));
@@ -635,4 +634,41 @@ fn render_workspace_view_keys_double_middle_click_and_navigators_work() {
         assert!(h.app.cam.back().dot(solidcraft_engine::geom::Vec3::Z) > 0.999, "{style:?}: view from +Z, got {:?}", h.app.cam.back());
         assert!(h.app.session.selection.is_empty());
     }
+}
+
+/// #1464: a maximised 4K or 5K window is past the preview's pixel budget. The preview draws
+/// smaller at the same aspect instead of refusing every frame.
+#[test]
+fn four_and_five_k_viewports_preview_downscaled_within_the_limits() {
+    use solidcraft_engine::render::*;
+    for samples in [1, 4, 16] {
+        let host = host_executor(16384, true, samples).unwrap();
+        let mut s = Session::default();
+        s.set_render_viewport(Some(host.clone())).unwrap();
+        let request = |width, height| RenderRequest {
+            backend: None,
+            mode: RenderMode::Preview,
+            operation: RenderOperation::Viewport,
+            width,
+            height,
+            format: None,
+            features: vec![RenderFeature::Pbr],
+            policy: Default::default(),
+        };
+        if samples <= 4 {
+            assert_eq!(preview_size(s.render_viewport(), (1920, 1080)), (1920, 1080), "fits: drawn at full size");
+        }
+        // 16× MSAA's scratch cost brings even 1080p under the budget.
+        let sizes: &[(u64, u64)] = if samples == 16 { &[(1920, 1080), (3840, 2160), (5120, 2880)] } else { &[(3840, 2160), (5120, 2880)] };
+        for &full in sizes {
+            assert!(resolve_request(&[s.render_backend()], &request(full.0, full.1)).is_err(), "{full:?} at full size is over the limit");
+            let (w, h) = preview_size(s.render_viewport(), full);
+            assert!(w < full.0 && h < full.1 && w * h <= host.limits.max_pixels, "{full:?} -> {w}x{h}");
+            assert!((w as f64 / h as f64 - 16.0 / 9.0).abs() < 0.01, "{w}x{h} keeps the aspect");
+            let resolved = resolve_request(&[s.render_backend()], &request(w, h)).unwrap();
+            assert_eq!(resolved.executor.as_str(), "gpu-viewport");
+            assert!(resolved.estimated_scratch_bytes <= host.limits.max_scratch_bytes);
+        }
+    }
+    assert_eq!(preview_size(None, (5120, 2880)), (5120, 2880), "no executor: resolution reports it");
 }

@@ -73,7 +73,9 @@ copy_docs "$APP/Contents/Resources/Licenses"
 sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHORT_VERSION@/$SHORT_VERSION/g" "$ROOT/assets/platforms/macos/Info.plist.in" >"$APP/Contents/Info.plist"
 plutil -lint "$APP/Contents/Info.plist"
 printf 'APPL????' >"$APP/Contents/PkgInfo"
-# Ad-hoc signature over the whole bundle (Apple silicon refuses unsigned code).
+# Ad-hoc signature over the whole bundle (Apple silicon refuses unsigned code). Nested code is
+# signed first: the bundle signature refuses an unsigned helper in Contents/MacOS.
+codesign --force --sign - --timestamp=none --identifier "$MACOS_BUNDLE_ID-cli" "$APP/Contents/MacOS/solidcraft-cli"
 codesign --force --sign - --timestamp=none "$APP"
 codesign --verify --strict --deep --verbose=2 "$APP"
 test -x "$APP/Contents/MacOS/solidcraft-cli" || { echo "solidcraft-cli is missing from $APP" >&2; exit 1; }

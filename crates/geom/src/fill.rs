@@ -33,7 +33,7 @@ const GAUSS4: [(f64, f64); 4] = [
     (0.861_136_311_594_052_6, 0.347_854_845_137_453_8),
 ];
 /// The smoothness term's weight per fitted point (see [`fill_loop`]).
-const SMOOTHNESS: f64 = 1e-7;
+pub(crate) const SMOOTHNESS: f64 = 1e-7;
 /// A loop step shorter than this fraction of its length in space, seen along the normal, runs
 /// along the normal (steeper than about 87° from the plane).
 const MIN_STEP_SLOPE: f64 = 0.05;
@@ -292,10 +292,29 @@ fn crown_fill(surface: NurbsSurface, uv: &[[f64; 2]], crown: f64, normal: Vec3) 
     if crown == 0.0 {
         return Ok((surface, 0, 0.0));
     }
+    if !normal.is_finite() {
+        return invalid("the loop's extent is not finite");
+    }
+    crown_fill_along(surface, uv, crown, &|_| Some(normal), MAX_FILL_SPANS)
+}
+
+/// [`crown_fill`] moving each control point along `along(ξ, η)` (at its Greville point, the mean
+/// of its knots each way) rather than one normal: what a fill that is not a height field takes,
+/// with its own normal there. Its net may be refined up to `max_spans` each way.
+pub(crate) fn crown_fill_along(
+    surface: NurbsSurface,
+    uv: &[[f64; 2]],
+    crown: f64,
+    along: &dyn Fn([f64; 2]) -> Option<Vec3>,
+    max_spans: usize,
+) -> SplineResult<(NurbsSurface, usize, f64)> {
+    if crown == 0.0 {
+        return Ok((surface, 0, 0.0));
+    }
     let gap = loop_gap(uv);
     let mut base = surface;
     loop {
-        if let Some((crowned, points)) = crown_net(&base, uv, gap, crown, normal)? {
+        if let Some((crowned, points)) = crown_net(&base, uv, gap, crown, along)? {
             let mut drift = 0.0f64;
             for q in uv {
                 if let (Ok(a), Ok(b)) = (base.eval(q[0], q[1]), crowned.eval(q[0], q[1])) {
@@ -309,11 +328,11 @@ fn crown_fill(surface: NurbsSurface, uv: &[[f64; 2]], crown: f64, normal: Vec3) 
         }
         // No room inside the loop yet: halve the cells (the surface itself does not change).
         let spans = [0, 1].map(|d| base.count()[d].saturating_sub(3));
-        if spans[0] >= MAX_FILL_SPANS && spans[1] >= MAX_FILL_SPANS {
+        if spans[0] >= max_spans && spans[1] >= max_spans {
             return Err(SplineError::Unsupported("crowning a patch whose loop leaves no room inside it".into()));
         }
         for (d, &s) in spans.iter().enumerate() {
-            if s < MAX_FILL_SPANS {
+            if s < max_spans {
                 base = subdivide(&base, d)?;
             }
         }
@@ -324,13 +343,19 @@ fn crown_fill(surface: NurbsSurface, uv: &[[f64; 2]], crown: f64, normal: Vec3) 
 /// loop takes `crown · size · B(ξ, η)`, `B` the bubble's blossom at the point's knots (so the
 /// surface between the perturbed points is exactly the bubble, not a fit of it) and `size` the
 /// box's diagonal. `None` when the net has no such point.
-fn crown_net(base: &NurbsSurface, uv: &[[f64; 2]], gap: [f64; 2], crown: f64, normal: Vec3) -> SplineResult<Option<(NurbsSurface, usize)>> {
+fn crown_net(
+    base: &NurbsSurface,
+    uv: &[[f64; 2]],
+    gap: [f64; 2],
+    crown: f64,
+    along: &dyn Fn([f64; 2]) -> Option<Vec3>,
+) -> SplineResult<Option<(NurbsSurface, usize)>> {
     let [cu, cv] = base.count();
     let degree = base.degree();
     let knots = base.knots();
     let domain = base.domain();
     let size = (domain[0][1] - domain[0][0]).hypot(domain[1][1] - domain[1][0]);
-    if !(size > 0.0 && size.is_finite() && normal.is_finite()) {
+    if !(size > 0.0 && size.is_finite()) {
         return invalid("the loop's extent is not finite");
     }
     // The bubble `4·s·(1−s)` per direction, as a quadratic in the plane coordinate.
@@ -351,6 +376,8 @@ fn crown_net(base: &NurbsSurface, uv: &[[f64; 2]], gap: [f64; 2], crown: f64, no
                 continue;
             }
             let bump = crown * size * blossom(qu, u_knots) * blossom(qv, v_knots);
+            let mean = |t: [f64; 3]| (t[0] + t[1] + t[2]) / 3.0;
+            let Some(normal) = along([mean(u_knots), mean(v_knots)]).filter(|n| n.is_finite()) else { continue };
             let Some(slot) = ctrl.get_mut(j * cu + i) else { continue };
             let h = *slot;
             let Some(p) = h.project() else { continue };
@@ -431,7 +458,7 @@ fn loop_gap(uv: &[[f64; 2]]) -> [f64; 2] {
 }
 
 /// Whether `p` is inside the closed loop `uv` (ray casting).
-fn inside_loop(p: [f64; 2], uv: &[[f64; 2]]) -> bool {
+pub(crate) fn inside_loop(p: [f64; 2], uv: &[[f64; 2]]) -> bool {
     let m = uv.len();
     let mut inside = false;
     for k in 0..m {
@@ -512,7 +539,7 @@ fn check_projectable(points: &[Vec3], uv: &[[f64; 2]]) -> SplineResult<()> {
 }
 
 /// Whether the closed segments `ab` and `cd` share a point.
-fn segments_meet(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> bool {
+pub(crate) fn segments_meet(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> bool {
     let orient = |p: [f64; 2], q: [f64; 2], r: [f64; 2]| (q[0] - p[0]) * (r[1] - p[1]) - (q[1] - p[1]) * (r[0] - p[0]);
     let within =
         |p: [f64; 2], q: [f64; 2], r: [f64; 2]| r[0] >= p[0].min(q[0]) && r[0] <= p[0].max(q[0]) && r[1] >= p[1].min(q[1]) && r[1] <= p[1].max(q[1]);
@@ -525,9 +552,9 @@ fn segments_meet(a: [f64; 2], b: [f64; 2], c: [f64; 2], d: [f64; 2]) -> bool {
 
 /// A bicubic height field's grid: uniform clamped knots over `[lo, hi]` in each direction,
 /// `count` control points along each.
-struct Grid {
-    knots: [Vec<f64>; 2],
-    count: [usize; 2],
+pub(crate) struct Grid {
+    pub(crate) knots: [Vec<f64>; 2],
+    pub(crate) count: [usize; 2],
 }
 
 impl LoopFill {
@@ -540,7 +567,7 @@ impl LoopFill {
 }
 
 impl Grid {
-    fn new(spans: [usize; 2], lo: [f64; 2], hi: [f64; 2]) -> Grid {
+    pub(crate) fn new(spans: [usize; 2], lo: [f64; 2], hi: [f64; 2]) -> Grid {
         let knots = [0, 1].map(|d| {
             let (a, b, s) = (lo[d], hi[d], spans[d]);
             let mut k = vec![a; 4];
@@ -552,7 +579,7 @@ impl Grid {
     }
 
     /// The length of one span in direction `d`.
-    fn cell(&self, d: usize) -> f64 {
+    pub(crate) fn cell(&self, d: usize) -> f64 {
         let (Some(k), Some(&c)) = (self.knots.get(d), self.count.get(d)) else { return 0.0 };
         (k.last().copied().unwrap_or(0.0) - k.first().copied().unwrap_or(0.0)) / (c - 3) as f64
     }
@@ -564,7 +591,7 @@ impl Grid {
 
     /// The four non-zero basis functions' `r`-th derivatives and the first index, at `x` in
     /// direction `d`.
-    fn basis_derivative(&self, d: usize, x: f64, r: usize) -> Option<(usize, [f64; 4])> {
+    pub(crate) fn basis_derivative(&self, d: usize, x: f64, r: usize) -> Option<(usize, [f64; 4])> {
         let kn = self.knots.get(d)?;
         let x = x.clamp(*kn.first()?, *kn.last()?);
         let span = find_span(kn, 3, *self.count.get(d)?, x)?;
@@ -622,6 +649,22 @@ impl Grid {
         // against the data term (squared heights) alike at any size. Each term is a product of
         // one-direction Gram matrices of the basis functions' derivatives.
         let lambda = SMOOTHNESS * fitted as f64 / n as f64 * self.cell(0) * self.cell(1);
+        self.add_energy(&mut band, lambda);
+        band.solve(rhs)
+    }
+
+    /// Add `lambda` times the thin-plate energy `∫∫ h_uu² + 2·h_uv² + h_vv²` over the grid's box
+    /// to the normal equations `band` (unknowns i fastest): each term is a product of
+    /// one-direction Gram matrices of the basis functions' derivatives.
+    pub(crate) fn add_energy(&self, band: &mut Band, lambda: f64) {
+        let cu = self.count[0];
+        self.energy(lambda, &mut |(i, j), (k, l), e| band.add(j * cu + i, l * cu + k, e));
+    }
+
+    /// The entries of `lambda` times the thin-plate energy's matrix (see [`Grid::add_energy`]),
+    /// control point `(i, j)` against `(k, l)`, for every pair whose supports overlap.
+    pub(crate) fn energy(&self, lambda: f64, add: &mut dyn FnMut((usize, usize), (usize, usize), f64)) {
+        let [cu, cv] = self.count;
         let gram = |d: usize, r: usize| -> Vec<f64> {
             let c = self.count.get(d).copied().unwrap_or(0);
             let mut g = vec![0.0; c * c];
@@ -652,16 +695,14 @@ impl Grid {
         };
         for j in 0..cv {
             for i in 0..cu {
-                let r = j * cu + i;
                 for l in j.saturating_sub(3)..(j + 4).min(cv) {
                     for k in i.saturating_sub(3)..(i + 4).min(cu) {
                         let e: f64 = ENERGY.iter().map(|&(ru, rv, w)| w * g(0, ru, i, k) * g(1, rv, j, l)).sum();
-                        band.add(r, l * cu + k, lambda * e);
+                        add((i, j), (k, l), lambda * e);
                     }
                 }
             }
         }
-        band.solve(rhs)
     }
 
     /// The surface of the net `heights` over the plane `o`, `x`, `y`, `n`: control point `(i, j)`
@@ -680,14 +721,15 @@ impl Grid {
 }
 
 /// A symmetric banded matrix: the upper band, row `r` holding columns `r ..= r + bw`.
-struct Band {
+#[derive(Clone)]
+pub(crate) struct Band {
     n: usize,
     bw: usize,
     a: Vec<f64>,
 }
 
 impl Band {
-    fn new(n: usize, bw: usize) -> Band {
+    pub(crate) fn new(n: usize, bw: usize) -> Band {
         Band { n, bw, a: vec![0.0; n * (bw + 1)] }
     }
     fn index(&self, r: usize, s: usize) -> Option<usize> {
@@ -704,7 +746,7 @@ impl Band {
     }
     /// Add `v` at `(r, s)` with `r ≤ s` (the lower half is the same by symmetry: callers adding
     /// a full outer product reach each stored entry once through `r ≤ s`).
-    fn add(&mut self, r: usize, s: usize, v: f64) {
+    pub(crate) fn add(&mut self, r: usize, s: usize, v: f64) {
         if r <= s
             && let Some(x) = self.index(r, s).and_then(|i| self.a.get_mut(i))
         {
@@ -713,7 +755,13 @@ impl Band {
     }
     /// Solve `A·x = b` by banded Cholesky factorisation `A = Uᵀ·U`; an error when `A` is not
     /// positive definite.
-    fn solve(mut self, mut b: Vec<f64>) -> SplineResult<Vec<f64>> {
+    fn solve(self, b: Vec<f64>) -> SplineResult<Vec<f64>> {
+        self.factor()?.substitute(b)
+    }
+
+    /// The Cholesky factor `U` of `A = Uᵀ·U`, in place; an error when `A` is not positive
+    /// definite.
+    pub(crate) fn factor(mut self) -> SplineResult<Band> {
         let (n, bw) = (self.n, self.bw);
         for r in 0..n {
             let mut d = self.get(r, r);
@@ -734,6 +782,48 @@ impl Band {
                 self.set(r, s, v / d);
             }
         }
+        Ok(self)
+    }
+
+    /// [`Band::factor`] by rows: once row `r` of `U` is known, the rows below it within the band
+    /// are updated from it at once (right-looking), which walks memory row by row instead of down
+    /// columns. The same factor, to rounding; what the general fill, whose bands are wide, uses.
+    pub(crate) fn factor_rows(mut self) -> SplineResult<Band> {
+        let (n, bw) = (self.n, self.bw);
+        let w = bw + 1;
+        let mut row = vec![0.0; w];
+        for r in 0..n {
+            let Some(here) = self.a.get_mut(r * w..r * w + w) else { return invalid("the fit's equations are out of shape") };
+            let d = here.first().copied().unwrap_or(0.0);
+            if !(d > 0.0) {
+                return invalid("the fit's equations are singular");
+            }
+            let d = d.sqrt();
+            for (k, x) in here.iter_mut().enumerate() {
+                *x = if k == 0 { d } else { *x / d };
+            }
+            row.copy_from_slice(here);
+            let end = (r + bw + 1).min(n);
+            for s in r + 1..end {
+                let us = row.get(s - r).copied().unwrap_or(0.0);
+                if us == 0.0 {
+                    continue;
+                }
+                let len = end - s;
+                let (Some(dst), Some(src)) = (self.a.get_mut(s * w..s * w + len), row.get(s - r..s - r + len)) else {
+                    return invalid("the fit's equations are out of shape");
+                };
+                for (x, y) in dst.iter_mut().zip(src) {
+                    *x -= us * y;
+                }
+            }
+        }
+        Ok(self)
+    }
+
+    /// Solve `Uᵀ·U·x = b` with a factor from [`Band::factor`].
+    pub(crate) fn substitute(&self, mut b: Vec<f64>) -> SplineResult<Vec<f64>> {
+        let (n, bw) = (self.n, self.bw);
         // Uᵀ·y = b, then U·x = y.
         for r in 0..n {
             let mut v = b.get(r).copied().unwrap_or(0.0);

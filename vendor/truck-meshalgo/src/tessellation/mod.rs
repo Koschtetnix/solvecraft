@@ -25,6 +25,13 @@ pub fn preview_face<S: RobustMeshableSurface>(surface: &S, loops: &[Vec<Point3>]
     triangulation::preview_face(surface, loops, steps)
 }
 
+/// SolidCraft: an edge's polyline as the meshers divide it (at most 20 000 points). Exposed for
+/// the kernel's regressions in the workspace CI.
+#[doc(hidden)]
+pub fn bounded_polyline<C: PolylineableCurve>(curve: &C, range: (f64, f64), d: Deflection) -> PolylineCurve {
+    triangulation::bounded_polyline(curve, range, d)
+}
+
 /// SolidCraft: sampling a curve that may fail to evaluate. truck's `IntersectionCurve::subs`
 /// unwraps the projection of its leader's point onto both surfaces, which does not converge
 /// everywhere; the mesher samples through this trait so that a failed sample is data, not a panic.
@@ -145,8 +152,9 @@ impl Deflection {
 
     /// The squared sag over squared length above which a facet turns more than `angle`: a
     /// chord spanning `a` of a circle sags `tan(a / 4) / 2` of its length. Infinite without
-    /// an angle bound.
-    pub(super) fn turn2(&self) -> f64 {
+    /// an angle bound. SolidCraft: public for the kernel's regressions.
+    #[doc(hidden)]
+    pub fn turn2(&self) -> f64 {
         match self.angular() && self.angle < std::f64::consts::PI {
             true => (f64::tan(self.angle / 4.0) / 2.0).powi(2),
             false => f64::INFINITY,
@@ -154,8 +162,9 @@ impl Deflection {
     }
 
     /// Whether the angle bound splits a facet of squared sag `sag2` and squared length `len2`
-    /// (`turn2` from [`Deflection::turn2`]).
-    pub(super) fn turns(&self, turn2: f64, sag2: f64, len2: f64) -> bool {
+    /// (`turn2` from [`Deflection::turn2`]). SolidCraft: public for the kernel's regressions.
+    #[doc(hidden)]
+    pub fn turns(&self, turn2: f64, sag2: f64, len2: f64) -> bool {
         turn2.is_finite() && sag2 > self.floor * self.floor && sag2 > turn2 * len2
     }
 }
@@ -500,3 +509,6 @@ impl<C: PolylineableCurve, S: RobustMeshableSurface> RobustMeshableShape
 }
 
 mod triangulation;
+#[cfg(feature = "test-hooks")]
+#[doc(hidden)]
+pub use triangulation::include_test_hooks;
